@@ -1,0 +1,136 @@
+# Orbit CLI 빌드 게이트 — Tekton Task 샘플
+#
+# 노드의 도커 소켓 없이, podman sidecar로 로컬 이미지를 게이트가 읽게 하는 구성입니다.
+# 사용 전에 아래 값을 환경에 맞게 바꿉니다.
+#   params.image-ref    : 빌드해서 판정할 이미지 참조(레지스트리 포함)
+#   params.pipeline-ref : {클러스터}/{네임스페이스}/{Task 또는 Pipeline 이름} 형태의 고정값
+#   gate step의 image   : <64자 hex> 자리에 확인한 CLI 이미지 digest를 넣습니다.
+# 필요한 Secret: orbit-creds (ORBIT_CLIENT_ID, ORBIT_CLIENT_SECRET). 생성 방법은 README 참고.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: orbit-build-gate
+  namespace: orbit-ci
+spec:
+  params:
+    - name: image-ref
+      default: registry.example.com/team/myapp:candidate
+    - name: pipeline-ref
+      default: my-cluster/orbit-ci/orbit-build-gate
+  workspaces:
+    - name: source
+
+  volumes:
+    - name: cstore        # containers-storage. buildah와 podman이 공유합니다.
+      emptyDir: {}
+    - name: xdg           # runroot와 소켓
+      emptyDir: {}
+
+  sidecars:
+    - name: podman
+      image: quay.io/podman/stable:v5.5
+      securityContext:
+        runAsUser: 0      # 볼륨 위 스토리지는 root여야 합니다.
+        capabilities:
+          add: ["SETUID", "SETGID"]
+        seccompProfile:
+          type: Unconfined
+      volumeMounts:
+        - name: cstore
+          mountPath: /var/lib/shared-store
+        - name: xdg
+          mountPath: /run/x
+      command: ["sh", "-c"]
+      args:
+        - |
+          set -e
+          mkdir -p /run/x/containers /run/x/podman
+          exec podman --root /var/lib/shared-store --runroot /run/x/containers \
+            --storage-driver vfs \
+            system service --time=0 unix:///run/x/podman/podman.sock
+      readinessProbe:     # 소켓이 준비될 때까지 기다립니다. sleep으로 대신하지 않습니다.
+        exec:
+          command: ["sh", "-c", "test -S /run/x/podman/podman.sock"]
+        initialDelaySeconds: 2
+        periodSeconds: 2
+        failureThreshold: 30
+
+  steps:
+    # 1) 빌드. 최종 이미지 참조로 태그만 하고 push하지 않습니다.
+    - name: build
+      image: quay.io/buildah/stable:v1.40
+      # 게이트 step은 셸이 없어 아키텍처를 계산할 수 없습니다. 여기서 결과로 넘깁니다.
+      results:
+        - name: platform
+          type: string
+      securityContext:
+        runAsUser: 0
+        capabilities:
+          add: ["SETUID", "SETGID"]
+        seccompProfile:
+          type: Unconfined
+      volumeMounts:
+        - name: cstore
+          mountPath: /var/lib/shared-store
+        - name: xdg
+          mountPath: /run/x
+      script: |
+        #!/bin/sh
+        set -eu
+        buildah --root /var/lib/shared-store --runroot /run/x/containers \
+          --storage-driver vfs bud -t "$(params.image-ref)" "$(workspaces.source.path)"
+
+        # 이 Task는 교차 빌드를 하지 않습니다. 산출물은 이 노드의 아키텍처입니다.
+        case "$(uname -m)" in
+          x86_64|amd64)  ARCH=amd64 ;;
+          aarch64|arm64) ARCH=arm64 ;;
+          *) echo "지원하지 않는 아키텍처: $(uname -m)" >&2; exit 1 ;;
+        esac
+        printf 'linux/%s' "$ARCH" > "$(step.results.platform.path)"
+
+    # 2) 판정. CLI 이미지에는 셸이 없어 args로만 넘깁니다.
+    - name: gate
+      image: ghcr.io/oliveworks-io/orbit-cli:2.0.0@sha256:<64자 hex>
+      onError: continue   # 차단(exit 1)이어도 다음 step이 돌아야 합니다.
+      securityContext:
+        runAsUser: 0
+      env:
+        - name: ORBIT_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: orbit-creds
+              key: ORBIT_CLIENT_ID
+        - name: ORBIT_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: orbit-creds
+              key: ORBIT_CLIENT_SECRET
+        - name: XDG_RUNTIME_DIR   # CLI는 여기서 소켓을 찾습니다.
+          value: /run/x
+      volumeMounts:
+        - name: xdg
+          mountPath: /run/x
+      args:
+        - scan
+        - image
+        - $(params.image-ref)
+        - --platform=$(steps.build.results.platform)
+        - --pipeline-ref=$(params.pipeline-ref)
+        - --ci-run-id=$(context.taskRun.name)
+        - --details
+        - --format=json
+        - --output=$(workspaces.source.path)/gate.json
+
+    # 3) 판정 해석. 통과가 아니면 중단합니다.
+    - name: verdict
+      image: alpine:3
+      script: |
+        #!/bin/sh
+        set -eu
+        WS="$(workspaces.source.path)"
+        EXIT="$(cat "$(steps.step-gate.exitCode.path)" 2>/dev/null || echo 2)"
+        [ -s "$WS/gate.json" ] && cat "$WS/gate.json" || echo "(판정 응답 없음)"
+        [ "$EXIT" = "0" ] || { echo "게이트 차단/오류 (exit $EXIT)"; exit 1; }
+
+# TBD: 이미지를 레지스트리에 push한 뒤 scan promote로 digest를 보고하는 step은
+#      이 샘플에 포함하지 않았습니다. push 방식(buildah push 등)이 환경마다 달라 확정하지 못했습니다.

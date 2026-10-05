@@ -1,0 +1,13 @@
+# 커밋 전에 인증 정보 유출을 막는 로컬 훅입니다.
+# 설치: pip install pre-commit && pre-commit install
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.28.0 # 사용 전에 최신 릴리스로 확인하십시오.
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: detect-private-key
+      - id: check-added-large-files

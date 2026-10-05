@@ -1,0 +1,102 @@
+// Orbit CLI 빌드 게이트 — Jenkins Declarative Pipeline 샘플
+//
+// 기존 파이프라인에 Tag, Orbit Security, Promote 단계를 끼워 넣는 예입니다.
+// 사용 전에 아래 값을 환경에 맞게 바꿉니다.
+//   IMAGE            : 배포할 이미지 이름(레지스트리 포함)
+//   ORBIT_CLI_IMAGE  : CLI 이미지. <64자 hex> 자리에 확인한 digest를 넣습니다.
+// 필요한 자격: Jenkins Credentials에 Secret text 유형으로 orbit-client-id,
+//              orbit-client-secret 두 개를 등록합니다.
+pipeline {
+    agent any   // Docker를 쓸 수 있는 에이전트
+
+    environment {
+        IMAGE               = 'registry.example.com/team/myapp'
+        CANDIDATE_IMAGE     = 'myapp:candidate'
+        ORBIT_CLI_IMAGE     = 'ghcr.io/oliveworks-io/orbit-cli:2.0.0@sha256:<64자 hex>'
+        ORBIT_CLIENT_ID     = credentials('orbit-client-id')
+        ORBIT_CLIENT_SECRET = credentials('orbit-client-secret')
+    }
+
+    stages {
+        // 1) 푸시하지 않고 로컬에만 적재합니다.
+        stage('Build') {
+            steps { sh 'docker build -t "$CANDIDATE_IMAGE" .' }
+        }
+
+        // 2) 최종 이미지 참조를 붙입니다(푸시 아님).
+        stage('Tag') {
+            steps {
+                script {
+                    env.ORBIT_GATE_REF = "${env.IMAGE}:${env.GIT_COMMIT}"
+                    sh 'docker tag "$CANDIDATE_IMAGE" "$ORBIT_GATE_REF"'
+                }
+            }
+        }
+
+        // 3) 판정을 받습니다.
+        stage('Orbit Security') {
+            steps {
+                script {
+                    // 도커 소켓의 그룹 ID는 컨테이너를 띄워서 측정합니다.
+                    env.SOCK_GID = sh(returnStdout: true, script:
+                        '''docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+                           alpine:3 stat -c '%g' /var/run/docker.sock''').trim()
+
+                    // 플랫폼(아키텍처)을 손으로 적지 않습니다. 빌드는 이 에이전트의 아키텍처로 만들어집니다.
+                    env.ORBIT_PLATFORM = sh(returnStdout: true, script:
+                        '''docker image inspect --format '{{.Os}}/{{.Architecture}}' \
+                           "$ORBIT_GATE_REF"''').trim()
+
+                    // sh가 차단(exit 1)에서 바로 실패하지 않도록 종료 코드를 직접 받습니다.
+                    def status = sh(returnStatus: true, script: '''
+                        docker run --rm \
+                          -e JENKINS_URL -e JOB_NAME -e GIT_URL -e GIT_COMMIT -e BUILD_NUMBER \
+                          -e ORBIT_CLIENT_ID -e ORBIT_CLIENT_SECRET \
+                          --group-add "$SOCK_GID" \
+                          -v /var/run/docker.sock:/var/run/docker.sock \
+                          "$ORBIT_CLI_IMAGE" \
+                          scan image "$ORBIT_GATE_REF" \
+                            --platform "$ORBIT_PLATFORM" \
+                            --details --format json \
+                          > gate.json
+                    ''')
+                    sh 'cat gate.json || echo "(판정 응답 없음)"'
+
+                    // Promote 단계에서 쓸 requestId를 저장합니다.
+                    env.ORBIT_REQUEST_ID = sh(returnStdout: true, script:
+                        '''grep -o '"requestId" *: *"[^"]*"' gate.json | head -n 1 | cut -d'"' -f4 || true''').trim()
+
+                    // 통과가 아닌 모든 경우(차단, 오류)에 중단합니다.
+                    if (status != 0) { error("게이트 차단/오류 (exit=${status})") }
+                }
+            }
+        }
+
+        // 4) 판정한 그 이미지를 그대로 올립니다.
+        stage('Push') {
+            steps {
+                sh 'docker push "$ORBIT_GATE_REF"'
+                script {
+                    env.ORBIT_IMAGE_DIGEST = sh(returnStdout: true, script:
+                        '''docker inspect --format='{{index .RepoDigests 0}}' "$ORBIT_GATE_REF" | cut -d'@' -f2''').trim()
+                }
+            }
+        }
+
+        // 5) 선택: 확정된 digest를 보고해 런타임 이미지와 연결합니다.
+        stage('Promote') {
+            steps {
+                sh '''
+                    [ -n "$ORBIT_REQUEST_ID" ]   || { echo "requestId가 없어 보고하지 않습니다"; exit 0; }
+                    [ -n "$ORBIT_IMAGE_DIGEST" ] || { echo "digest를 확인하지 못해 보고하지 않습니다"; exit 0; }
+                    docker run --rm \
+                      -e ORBIT_CLIENT_ID -e ORBIT_CLIENT_SECRET \
+                      "$ORBIT_CLI_IMAGE" \
+                      scan promote \
+                        --request-id   "$ORBIT_REQUEST_ID" \
+                        --image-digest "$ORBIT_IMAGE_DIGEST"
+                '''
+            }
+        }
+    }
+}

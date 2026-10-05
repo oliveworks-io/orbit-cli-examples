@@ -1,0 +1,6 @@
+# 이 저장소의 모든 변경은 아래 소유자의 리뷰와 승인이 필요합니다.
+* @oliveworks-io/orbit-maintainers
+
+# CI 워크플로와 저장소 설정 파일은 변경 영향이 크므로 명시적으로 지정합니다.
+/.github/ @oliveworks-io/orbit-maintainers
+/LICENSE @oliveworks-io/orbit-maintainers

@@ -1,0 +1,22 @@
+# gitleaks 설정: 기본 규칙을 모두 사용하고, 이 저장소 전용 규칙을 추가합니다.
+title = "orbit-cli-examples gitleaks config"
+
+[extend]
+useDefault = true
+
+# 변수에 실제 값을 직접 대입한 경우를 탐지합니다.
+# (변수 이름만 쓰거나 ${...}, $(...), secretKeyRef로 참조하는 것은 탐지하지 않습니다.)
+[[rules]]
+id = "orbit-client-credential-assignment"
+description = "ORBIT_CLIENT_ID / ORBIT_CLIENT_SECRET에 값이 직접 대입됨"
+regex = '''(?i)ORBIT_CLIENT_(?:ID|SECRET)["']?\s*[:=]\s*["']?([A-Za-z0-9_\-+/=.]{8,})'''
+secretGroup = 1
+keywords = ["orbit_client_"]
+
+  [[rules.allowlists]]
+  description = "플레이스홀더와 변수 참조는 허용"
+  regexTarget = "match"
+  regexes = [
+    '''(?i)<[^>]*>''',
+    '''(?i)(?:your|example|changeme|placeholder|xxxx|dummy)''',
+  ]

@@ -1,0 +1,42 @@
+# 인증 정보와 로컬 설정 파일이 실수로 커밋되지 않도록 제외합니다.
+
+# 환경 변수 파일
+.env
+.env.*
+!.env.example
+*.env
+
+# 키와 인증서
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa*
+id_ed25519*
+
+# 클라우드·도구 자격 증명
+.aws/
+.azure/
+.gcloud/
+.docker/config.json
+.kube/
+kubeconfig*
+.netrc
+.npmrc
+.pypirc
+credentials*.json
+service-account*.json
+
+# 시크릿 매니페스트 (예제 README의 생성 명령으로 만든 파일)
+*secret*.yaml
+*secret*.yml
+*secret*.json
+!secret-scan.yml
+
+# 편집기·OS 파일
+.DS_Store
+.idea/
+.vscode/
+*.swp
