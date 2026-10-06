@@ -1,0 +1,75 @@
+# Orbit CLI 시험 — GitLab CI
+#
+# 실제 적용용 템플릿(.gitlab-ci.yml)이 쓰지 않는 CLI 명령을 하나씩 실행해 확인합니다.
+#   version → doctor → scan file
+# 이미지 판정(scan image)과 digest 보고(scan promote)는 .gitlab-ci.yml에 있습니다.
+# 이미지를 만들거나 올리지 않으므로 레지스트리 자격이 필요 없습니다.
+#
+# 잡은 서로 의존하지 않습니다. 필요 없는 잡은 지워도 됩니다.
+#
+# 사용 전에 아래 값을 확인합니다.
+#   SCAN_TARGET     : scan file로 판정할 빌드 산출물 경로(저장소 기준). JAR, Go·Rust 바이너리,
+#                     rootfs 디렉터리 등. 소스 트리는 대상이 아닙니다.
+#   ORBIT_CLI_IMAGE : CLI 2.0.1에 digest로 고정되어 있습니다. 다른 버전은 README 참고
+# 필요한 CI/CD 변수: ORBIT_CLIENT_ID, ORBIT_CLIENT_SECRET(Masked)
+variables:
+  SCAN_TARGET: vendor/commons-text-1.9.jar
+  ORBIT_CLI_IMAGE: ghcr.io/oliveworks-io/orbit-cli:2.0.1@sha256:ce55fd53b389998ee2fa125ca6e5baf944384c1f9c56f5ff2c8e9bbe1e6aceca
+  # CLI 컨테이너에 넘길 환경변수. 컨테이너는 잡의 환경변수를 물려받지 않습니다.
+  ORBIT_ENV_ARGS: >-
+    -e CI_SERVER_HOST -e CI_SERVER_URL -e CI_PROJECT_PATH -e CI_CONFIG_PATH
+    -e CI_COMMIT_SHA -e CI_PIPELINE_ID
+    -e ORBIT_CLIENT_ID -e ORBIT_CLIENT_SECRET
+  # dind를 쓰는 경우에만 아래 세 줄이 필요합니다.
+  DOCKER_HOST: tcp://docker:2375
+  DOCKER_TLS_CERTDIR: ""
+  DOCKER_DRIVER: overlay2
+
+stages: [cli-test]
+
+.orbit-cli:
+  stage: cli-test
+  image: docker:27-cli
+  services:
+    - docker:27-dind          # dind 구성에서만
+
+# 1) version: CLI와 SBOM 생성 엔진의 버전을 출력합니다. 서버에 접속하지 않습니다.
+orbit_version:
+  extends: .orbit-cli
+  script:
+    - docker run --rm "$ORBIT_CLI_IMAGE" version
+
+# 2) doctor: 자격과 빌드 좌표를 점검합니다. 서버에 접속하지 않습니다.
+#    오류가 있으면 종료 코드 2로 잡이 실패합니다. 경고는 종료 코드를 바꾸지 않습니다.
+orbit_doctor:
+  extends: .orbit-cli
+  script:
+    - docker run --rm $ORBIT_ENV_ARGS "$ORBIT_CLI_IMAGE" doctor
+
+# 3) scan file: 빌드 산출물의 SBOM을 만들어 서버 판정을 받습니다.
+#    종료 코드 0(통과)이 아니면 잡이 실패합니다. 1(차단)과 2(오류)는 gate.json과 로그로 구분합니다.
+#    dind에서는 잡의 작업 폴더를 마운트할 수 없어 docker cp로 넣습니다.
+orbit_scan_file:
+  extends: .orbit-cli
+  script:
+    - |
+      # 산출물을 임시 폴더에 담아 폴더째 넣습니다. 파일을 그대로 넣으면 이름이 바뀌어 형식을 알아보지 못합니다.
+      NAME="$(basename "$SCAN_TARGET")"
+      TARGET_DIR="$(mktemp -d)"
+      cp -R "$SCAN_TARGET" "$TARGET_DIR/"
+      chmod -R a+rX "$TARGET_DIR"   # CLI는 비루트(65532)로 돕니다. mktemp 폴더(700)는 읽지 못합니다.
+      CID="$(docker create $ORBIT_ENV_ARGS "$ORBIT_CLI_IMAGE" \
+        scan file "/target/$NAME" --details --format json)"
+      docker cp "$TARGET_DIR" "$CID:/target"
+      set +e
+      docker start -a "$CID" > gate.json
+      GATE_EXIT=$?
+      set -e
+      docker rm "$CID" > /dev/null
+      if [ -s gate.json ]; then cat gate.json; else echo "(판정 응답 없음)"; fi
+      echo "scan file 종료 코드: $GATE_EXIT"
+      [ "$GATE_EXIT" = "0" ] || exit "$GATE_EXIT"
+  artifacts:
+    # 차단 사유는 판정 출력이 유일한 기록입니다. 결과와 관계없이 보관합니다.
+    when: always
+    paths: [gate.json]
