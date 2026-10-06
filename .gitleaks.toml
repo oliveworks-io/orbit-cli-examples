@@ -19,4 +19,6 @@ keywords = ["orbit_client_"]
   regexes = [
     '''(?i)<[^>]*>''',
     '''(?i)(?:your|example|changeme|placeholder|xxxx|dummy)''',
+    # Jenkins 자격 저장소 참조: ORBIT_CLIENT_ID = credentials('orbit-client-id')
+    '''(?i)[:=]\s*credentials$''',
   ]
