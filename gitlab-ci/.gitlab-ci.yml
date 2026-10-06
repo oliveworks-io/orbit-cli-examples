@@ -1,14 +1,37 @@
 # Orbit CLI 빌드 게이트 — GitLab CI 샘플
 #
-# 기존 빌드 잡에 단계를 끼워 넣는 예입니다. 빌드와 게이트는 한 잡에 둡니다.
-# (dind 서비스는 잡 단위라 잡을 나누면 만든 이미지가 사라집니다.)
-# 사용 전에 아래 값을 환경에 맞게 바꿉니다.
-#   ORBIT_CLI_IMAGE : <64자 hex> 자리에 확인한 digest를 넣습니다.
-# 필요한 CI/CD 변수: ORBIT_CLIENT_ID, ORBIT_CLIENT_SECRET (Masked 권장)
+# 실제 파이프라인에 적용하는 템플릿입니다.
+#   빌드 → 태그 → scan image → push → scan promote
+# CLI 명령 자체(version, doctor, scan file)의 시험은 .gitlab-ci.cli-test.yml에 있습니다.
+# script의 각 항목은 서로의 결과 변수에 기대지 않습니다. 필요 없는 항목은 지워도 나머지가 동작합니다.
+# 단, 빌드·태그는 판정할 이미지를 만드는 항목이라 scan image·push·promote를 쓰는 동안 남겨 둡니다.
+# 빌드와 게이트는 한 잡에 둡니다(dind 서비스는 잡 단위라 잡을 나누면 만든 이미지가 사라집니다).
+#
+# 필요한 CI/CD 변수: ORBIT_CLIENT_ID, ORBIT_CLIENT_SECRET(Masked)
+#                    REGISTRY_USERNAME, REGISTRY_TOKEN(Masked) — REGISTRY_LOGIN이 credentials일 때만
 variables:
-  IMAGE: $CI_REGISTRY_IMAGE
-  CANDIDATE_IMAGE: myapp:candidate
-  ORBIT_CLI_IMAGE: ghcr.io/oliveworks-io/orbit-cli:2.0.0@sha256:<64자 hex>
+  # ─── 여기만 바꿉니다 ───────────────────────────────────────────────────
+  # 같은 이름의 CI/CD 변수(Settings > CI/CD > Variables)로 넣으면 이 값을 덮어씁니다.
+  # 판정하고 올릴 이미지. 예: registry.example.com/team/myapp, GitLab 레지스트리는 $CI_REGISTRY_IMAGE
+  # 첫 부분(registry.example.com)이 레지스트리 주소이며, push와 로그인 모두 이 주소로 갑니다.
+  # 시연: ttl.sh/orbit/orbit-gate-hello-<임의 문자열> + IMAGE_TAG: "1h" (자격 불필요, 공개됨)
+  IMAGE: "<레지스트리>/<네임스페이스>/<이름>"
+  # 비우면 커밋 해시를 태그로 씁니다.
+  IMAGE_TAG: ""
+  # 레지스트리 로그인. 둘 중 하나를 반드시 적습니다. 정하지 않으면 push에서 멈춥니다.
+  #   credentials : CI/CD 변수 REGISTRY_USERNAME, REGISTRY_TOKEN으로 로그인합니다.
+  #   none        : 로그인하지 않습니다. ttl.sh나 이미 로그인된 러너일 때만 씁니다.
+  REGISTRY_LOGIN: "<credentials 또는 none>"
+  # ───────────────────────────────────────────────────────────────────────
+
+  CANDIDATE_IMAGE: orbit-gate-candidate:local
+  # CLI 2.0.1에 digest로 고정되어 있습니다. 다른 버전은 README 참고
+  ORBIT_CLI_IMAGE: ghcr.io/oliveworks-io/orbit-cli:2.0.1@sha256:ce55fd53b389998ee2fa125ca6e5baf944384c1f9c56f5ff2c8e9bbe1e6aceca
+  # CLI 컨테이너에 넘길 환경변수. 컨테이너는 잡의 환경변수를 물려받지 않습니다.
+  ORBIT_ENV_ARGS: >-
+    -e CI_SERVER_HOST -e CI_SERVER_URL -e CI_PROJECT_PATH -e CI_CONFIG_PATH
+    -e CI_COMMIT_SHA -e CI_PIPELINE_ID
+    -e ORBIT_CLIENT_ID -e ORBIT_CLIENT_SECRET
   # dind를 쓰는 경우에만 아래 세 줄이 필요합니다.
   DOCKER_HOST: tcp://docker:2375
   DOCKER_TLS_CERTDIR: ""
@@ -22,57 +45,63 @@ build_and_gate:
     # 1) 푸시하지 않고 로컬에만 적재합니다.
     - docker build -t "$CANDIDATE_IMAGE" .
 
-    # 2) 최종 이미지 참조를 붙입니다(푸시 아님).
+    # 2) 최종 이미지 참조를 붙입니다(푸시 아님). IMAGE를 설정하지 않았으면 여기서 멈춥니다.
     - |
-      REF="$IMAGE:$CI_COMMIT_SHA"
-      docker tag "$CANDIDATE_IMAGE" "$REF"
-      echo "$REF" > /tmp/orbit-ref
+      case "$IMAGE" in
+        ''|*'<'*) echo "IMAGE를 설정하십시오. 예: registry.example.com/team/myapp / 시연: ttl.sh/orbit/orbit-gate-hello-<임의 문자열> (IMAGE_TAG=1h)"; exit 1 ;;
+      esac
+      docker tag "$CANDIDATE_IMAGE" "$IMAGE:${IMAGE_TAG:-$CI_COMMIT_SHA}"
 
-    # 3) 판정을 받습니다.
+    # 3) 판정. 통과가 아닌 모든 경우(차단, 오류)에 중단합니다.
     - |
-      REF="$(cat /tmp/orbit-ref)"
+      REF="$IMAGE:${IMAGE_TAG:-$CI_COMMIT_SHA}"
       # 도커 소켓의 그룹 ID는 컨테이너를 띄워서 측정합니다.
       SOCK_GID="$(docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
         alpine:3 stat -c '%g' /var/run/docker.sock)"
       # 플랫폼(아키텍처)을 손으로 적지 않습니다. 빌드는 이 러너의 아키텍처로 만들어집니다.
       PLATFORM="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$REF")"
       set +e
-      docker run --rm \
-        -e CI_SERVER_HOST -e CI_SERVER_URL -e CI_PROJECT_PATH -e CI_CONFIG_PATH \
-        -e CI_COMMIT_SHA -e CI_PIPELINE_ID \
-        -e ORBIT_CLIENT_ID -e ORBIT_CLIENT_SECRET \
+      docker run --rm $ORBIT_ENV_ARGS \
         --group-add "$SOCK_GID" \
         -v /var/run/docker.sock:/var/run/docker.sock \
         "$ORBIT_CLI_IMAGE" \
-        scan image "$REF" \
-          --platform "$PLATFORM" \
-          --details --format json \
+        scan image "$REF" --platform "$PLATFORM" --details --format json \
         > gate.json
-      echo $? > /tmp/orbit-exit
+      GATE_EXIT=$?
       set -e
       if [ -s gate.json ]; then cat gate.json; else echo "(판정 응답 없음)"; fi
-
-    # 4) 통과가 아니면 중단합니다. 오류(2)도 통과가 아닙니다.
-    - |
-      GATE_EXIT="$(cat /tmp/orbit-exit)"
       [ "$GATE_EXIT" = "0" ] || { echo "게이트 차단/오류 (exit $GATE_EXIT)"; exit 1; }
 
-    # 5) 판정한 그 이미지를 그대로 올립니다.
-    - docker push "$(cat /tmp/orbit-ref)"
-
-    # 6) 선택: 확정된 digest를 보고해 런타임 이미지와 연결합니다.
+    # 4) 판정한 그 이미지를 그대로 올립니다. REGISTRY_LOGIN에 따라 로그인하고, 로그인 호스트는 IMAGE에서 뽑습니다.
     - |
-      REF="$(cat /tmp/orbit-ref)"
-      REQUEST_ID="$(grep -o '"requestId" *: *"[^"]*"' gate.json | head -n 1 | cut -d'"' -f4 || true)"
-      IMAGE_DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "$REF" | cut -d'@' -f2)"
-      if [ -n "$REQUEST_ID" ] && [ -n "$IMAGE_DIGEST" ]; then
-        docker run --rm \
-          -e ORBIT_CLIENT_ID -e ORBIT_CLIENT_SECRET \
-          "$ORBIT_CLI_IMAGE" \
-          scan promote --request-id "$REQUEST_ID" --image-digest "$IMAGE_DIGEST"
+      REF="$IMAGE:${IMAGE_TAG:-$CI_COMMIT_SHA}"
+      case "$IMAGE" in ttl.sh/*) echo "경고: ttl.sh는 공개 임시 레지스트리입니다. 누구나 이 이미지를 받을 수 있습니다." ;; esac
+      case "$REGISTRY_LOGIN" in
+        credentials)
+          [ -n "${REGISTRY_USERNAME:-}" ] && [ -n "${REGISTRY_TOKEN:-}" ] || { echo "REGISTRY_LOGIN=credentials인데 REGISTRY_USERNAME, REGISTRY_TOKEN이 없습니다"; exit 1; }
+          HOST="${IMAGE%%/*}"
+          case "$HOST" in *.*|*:*|localhost) ;; *) HOST=docker.io ;; esac
+          echo "$REGISTRY_TOKEN" | docker login -u "$REGISTRY_USERNAME" --password-stdin "$HOST" ;;
+        none) ;;
+        *) echo "REGISTRY_LOGIN을 정하십시오. 자격으로 로그인하려면 credentials, 로그인하지 않으려면 none"; exit 1 ;;
+      esac
+      docker push "$REF"
+
+    # 5) 확정 digest를 보고합니다. requestId는 gate.json에서, digest는 push된 이미지에서 직접 읽습니다.
+    #    앞 항목을 지워 값이 없으면 건너뜁니다.
+    - |
+      REF="$IMAGE:${IMAGE_TAG:-$CI_COMMIT_SHA}"
+      REQUEST_ID="$(grep -o '"requestId" *: *"[^"]*"' gate.json 2>/dev/null | head -n 1 | cut -d'"' -f4 || true)"
+      DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "$REF" 2>/dev/null | cut -d'@' -f2 || true)"
+      if [ -z "$REQUEST_ID" ]; then
+        echo "gate.json에 requestId가 없어 보고하지 않습니다"
+      elif [ -z "$DIGEST" ]; then
+        echo "push된 digest가 없어 보고하지 않습니다"
       else
-        echo "requestId 또는 digest를 확인하지 못해 보고하지 않습니다"
+        docker run --rm $ORBIT_ENV_ARGS "$ORBIT_CLI_IMAGE" \
+          scan promote --request-id "$REQUEST_ID" --image-digest "$DIGEST"
       fi
   artifacts:
+    # 차단 사유는 판정 출력이 유일한 기록입니다. 결과와 관계없이 보관합니다.
     when: always
     paths: [gate.json]

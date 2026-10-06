@@ -1,24 +1,47 @@
 # Orbit CLI 빌드 게이트 — Tekton Task 샘플
 #
+# 실제 파이프라인에 적용하는 템플릿입니다.
+#   build → scan image → push → scan promote
 # 노드의 도커 소켓 없이, podman sidecar로 로컬 이미지를 게이트가 읽게 하는 구성입니다.
-# 사용 전에 아래 값을 환경에 맞게 바꿉니다.
-#   params.image-ref    : 빌드해서 판정할 이미지 참조(레지스트리 포함)
-#   params.pipeline-ref : {클러스터}/{네임스페이스}/{Task 또는 Pipeline 이름} 형태의 고정값
-#   gate step의 image   : <64자 hex> 자리에 확인한 CLI 이미지 digest를 넣습니다.
-# 필요한 Secret: orbit-creds (ORBIT_CLIENT_ID, ORBIT_CLIENT_SECRET). 생성 방법은 README 참고.
+#
+# step 사이의 의존은 다음뿐입니다. 나머지 step은 지워도 다른 step이 동작합니다.
+#   - gate는 build의 결과(platform)를 씁니다.  build를 지우면 gate도 지웁니다.
+#   - promote는 push의 결과(digest, request-id)를 씁니다. push를 지우면 promote도 지웁니다.
+#
+# 입력은 params 한 곳에서 받습니다. 기본값을 고치거나 실행할 때 --param으로 넘깁니다.
+# 자리표시(<…>)가 남아 있으면 build step에서 멈춥니다.
+# CLI step의 image는 CLI 2.0.1에 digest로 고정되어 있습니다. 다른 버전은 README 참고
+# 필요한 Secret: orbit-creds (ORBIT_CLIENT_ID, ORBIT_CLIENT_SECRET)
+#                registry-creds (REGISTRY_USERNAME, REGISTRY_TOKEN) — registry-login이 credentials일 때만. 생성 방법은 README 참고.
 apiVersion: tekton.dev/v1
 kind: Task
 metadata:
   name: orbit-build-gate
   namespace: orbit-ci
 spec:
+  # ─── 여기만 바꿉니다 ───────────────────────────────────────────────────
   params:
+    # 판정하고 올릴 이미지 참조(태그 포함). 예: registry.example.com/team/myapp:<커밋>
+    # 첫 부분(registry.example.com)이 레지스트리 주소이며, push와 로그인 모두 이 주소로 갑니다.
+    # 시연: ttl.sh/orbit/orbit-gate-hello-<임의 문자열>:1h (자격 불필요, 공개됨)
     - name: image-ref
-      default: registry.example.com/team/myapp:candidate
+      default: <레지스트리>/<네임스페이스>/<이름>:<태그>
+    # {클러스터}/{네임스페이스}/{Task 또는 Pipeline 이름} 형태의 고정값. 예: my-cluster/orbit-ci/orbit-build-gate
     - name: pipeline-ref
-      default: my-cluster/orbit-ci/orbit-build-gate
+      default: <클러스터>/<네임스페이스>/<Task 이름>
+    # 소스 저장소 좌표. 예: github.com/example/myapp
+    # Tekton은 소스 좌표를 자동으로 얻지 못하고, CLI step에는 .git도 없습니다.
+    - name: source-ref
+      default: <소스 저장소 좌표>
+    - name: git-commit      # 기본값 없음. 빌드한 소스의 전체 커밋 해시를 실행할 때 넘깁니다.
+    # 레지스트리 로그인. 둘 중 하나를 반드시 적습니다. 정하지 않으면 push step에서 멈춥니다.
+    #   credentials : Secret registry-creds의 REGISTRY_USERNAME, REGISTRY_TOKEN으로 로그인합니다.
+    #   none        : 로그인하지 않습니다. ttl.sh일 때만 씁니다.
+    - name: registry-login
+      default: <credentials 또는 none>
+  # ───────────────────────────────────────────────────────────────────────
   workspaces:
-    - name: source
+    - name: source          # 이 저장소를 체크아웃한 곳. Dockerfile과 vendor/가 있어야 합니다.
 
   volumes:
     - name: cstore        # containers-storage. buildah와 podman이 공유합니다.
@@ -56,10 +79,10 @@ spec:
         failureThreshold: 30
 
   steps:
-    # 1) 빌드. 최종 이미지 참조로 태그만 하고 push하지 않습니다.
+    # 1) 빌드. 최종 이미지 참조로 태그만 하고 push하지 않습니다. 입력이 비었으면 여기서 멈춥니다.
     - name: build
       image: quay.io/buildah/stable:v1.40
-      # 게이트 step은 셸이 없어 아키텍처를 계산할 수 없습니다. 여기서 결과로 넘깁니다.
+      # CLI step은 셸이 없어 아키텍처를 계산할 수 없습니다. 여기서 결과로 넘깁니다.
       results:
         - name: platform
           type: string
@@ -77,6 +100,9 @@ spec:
       script: |
         #!/bin/sh
         set -eu
+        case "$(params.image-ref)|$(params.pipeline-ref)|$(params.source-ref)" in
+          *'<'*) echo "params의 image-ref, pipeline-ref, source-ref를 설정하십시오. 시연: image-ref=ttl.sh/orbit/orbit-gate-hello-<임의 문자열>:1h" >&2; exit 1 ;;
+        esac
         buildah --root /var/lib/shared-store --runroot /run/x/containers \
           --storage-driver vfs bud -t "$(params.image-ref)" "$(workspaces.source.path)"
 
@@ -88,23 +114,18 @@ spec:
         esac
         printf 'linux/%s' "$ARCH" > "$(step.results.platform.path)"
 
-    # 2) 판정. CLI 이미지에는 셸이 없어 args로만 넘깁니다.
+    # 2) 판정. 차단(exit 1)이어도 다음 step(verdict)이 돌아야 해서 onError: continue로 둡니다.
+    #    CLI 이미지에는 셸이 없어 CLI step은 모두 args로만 넘깁니다.
     - name: gate
-      image: ghcr.io/oliveworks-io/orbit-cli:2.0.0@sha256:<64자 hex>
-      onError: continue   # 차단(exit 1)이어도 다음 step이 돌아야 합니다.
+      image: ghcr.io/oliveworks-io/orbit-cli:2.0.1@sha256:ce55fd53b389998ee2fa125ca6e5baf944384c1f9c56f5ff2c8e9bbe1e6aceca
+      onError: continue
       securityContext:
         runAsUser: 0
       env:
         - name: ORBIT_CLIENT_ID
-          valueFrom:
-            secretKeyRef:
-              name: orbit-creds
-              key: ORBIT_CLIENT_ID
+          valueFrom: { secretKeyRef: { name: orbit-creds, key: ORBIT_CLIENT_ID } }
         - name: ORBIT_CLIENT_SECRET
-          valueFrom:
-            secretKeyRef:
-              name: orbit-creds
-              key: ORBIT_CLIENT_SECRET
+          valueFrom: { secretKeyRef: { name: orbit-creds, key: ORBIT_CLIENT_SECRET } }
         - name: XDG_RUNTIME_DIR   # CLI는 여기서 소켓을 찾습니다.
           value: /run/x
       volumeMounts:
@@ -116,12 +137,14 @@ spec:
         - $(params.image-ref)
         - --platform=$(steps.build.results.platform)
         - --pipeline-ref=$(params.pipeline-ref)
+        - --source-ref=$(params.source-ref)
+        - --git-commit=$(params.git-commit)
         - --ci-run-id=$(context.taskRun.name)
         - --details
         - --format=json
         - --output=$(workspaces.source.path)/gate.json
 
-    # 3) 판정 해석. 통과가 아니면 중단합니다.
+    # 판정 해석. 통과가 아니면 Task를 멈춥니다.
     - name: verdict
       image: alpine:3
       script: |
@@ -132,5 +155,61 @@ spec:
         [ -s "$WS/gate.json" ] && cat "$WS/gate.json" || echo "(판정 응답 없음)"
         [ "$EXIT" = "0" ] || { echo "게이트 차단/오류 (exit $EXIT)"; exit 1; }
 
-# TBD: 이미지를 레지스트리에 push한 뒤 scan promote로 digest를 보고하는 step은
-#      이 샘플에 포함하지 않았습니다. push 방식(buildah push 등)이 환경마다 달라 확정하지 못했습니다.
+    # 3) 판정한 그 이미지를 그대로 올립니다. registry-login에 따라 로그인하고, 로그인 호스트는 image-ref에서 뽑습니다.
+    #    promote가 쓸 digest와 requestId(gate.json)를 결과로 넘깁니다.
+    - name: push
+      image: quay.io/buildah/stable:v1.40
+      results:
+        - name: digest
+          type: string
+        - name: request-id
+          type: string
+      securityContext:
+        runAsUser: 0
+        capabilities:
+          add: ["SETUID", "SETGID"]
+        seccompProfile:
+          type: Unconfined
+      env:
+        - name: REGISTRY_USERNAME     # registry-login이 none이면 Secret이 없어도 됩니다.
+          valueFrom: { secretKeyRef: { name: registry-creds, key: REGISTRY_USERNAME, optional: true } }
+        - name: REGISTRY_TOKEN
+          valueFrom: { secretKeyRef: { name: registry-creds, key: REGISTRY_TOKEN, optional: true } }
+      volumeMounts:
+        - name: cstore
+          mountPath: /var/lib/shared-store
+        - name: xdg
+          mountPath: /run/x
+      script: |
+        #!/bin/sh
+        set -eu
+        B="buildah --root /var/lib/shared-store --runroot /run/x/containers --storage-driver vfs"
+        REF="$(params.image-ref)"
+        case "$REF" in ttl.sh/*) echo "경고: ttl.sh는 공개 임시 레지스트리입니다. 누구나 이 이미지를 받을 수 있습니다." ;; esac
+        case "$(params.registry-login)" in
+          credentials)
+            [ -n "${REGISTRY_USERNAME:-}" ] && [ -n "${REGISTRY_TOKEN:-}" ] || { echo "registry-login=credentials인데 Secret registry-creds가 없거나 비어 있습니다" >&2; exit 1; }
+            HOST="${REF%%/*}"
+            case "$HOST" in *.*|*:*|localhost) ;; *) HOST=docker.io ;; esac
+            echo "$REGISTRY_TOKEN" | $B login -u "$REGISTRY_USERNAME" --password-stdin "$HOST" ;;
+          none) ;;
+          *) echo "params의 registry-login을 정하십시오. 자격으로 로그인하려면 credentials, 로그인하지 않으려면 none" >&2; exit 1 ;;
+        esac
+        $B push --digestfile /tmp/digest "$(params.image-ref)" "docker://$(params.image-ref)"
+        tr -d '\n' < /tmp/digest > "$(step.results.digest.path)"
+        grep -o '"requestId" *: *"[^"]*"' "$(workspaces.source.path)/gate.json" 2>/dev/null \
+          | head -n 1 | cut -d'"' -f4 | tr -d '\n' > "$(step.results.request-id.path)" || true
+
+    # 4) 확정 digest를 보고합니다.
+    - name: promote
+      image: ghcr.io/oliveworks-io/orbit-cli:2.0.1@sha256:ce55fd53b389998ee2fa125ca6e5baf944384c1f9c56f5ff2c8e9bbe1e6aceca
+      env:
+        - name: ORBIT_CLIENT_ID
+          valueFrom: { secretKeyRef: { name: orbit-creds, key: ORBIT_CLIENT_ID } }
+        - name: ORBIT_CLIENT_SECRET
+          valueFrom: { secretKeyRef: { name: orbit-creds, key: ORBIT_CLIENT_SECRET } }
+      args:
+        - scan
+        - promote
+        - --request-id=$(steps.push.results.request-id)
+        - --image-digest=$(steps.push.results.digest)

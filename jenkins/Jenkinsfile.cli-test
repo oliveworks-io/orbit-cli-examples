@@ -1,0 +1,84 @@
+// Orbit CLI 시험 — Jenkins Declarative Pipeline
+//
+// 실제 적용용 템플릿(Jenkinsfile)이 쓰지 않는 CLI 명령을 하나씩 실행해 확인합니다.
+//   version → doctor → scan file
+// 이미지 판정(scan image)과 digest 보고(scan promote)는 Jenkinsfile에 있습니다.
+// 이미지를 만들거나 올리지 않으므로 레지스트리 자격이 필요 없습니다.
+//
+// stage는 서로 의존하지 않습니다. 필요 없는 stage는 블록째 지워도 됩니다.
+// 한 stage가 실패해도 다음 stage를 실행하도록 catchError로 감쌌습니다. 빌드 결과는 실패로 남습니다.
+//
+// 사용 전에 아래 값을 확인합니다.
+//   SCAN_TARGET     : scan file로 판정할 빌드 산출물 경로(저장소 기준). JAR, Go·Rust 바이너리,
+//                     rootfs 디렉터리 등. 소스 트리는 대상이 아닙니다.
+//   ORBIT_CLI_IMAGE : CLI 2.0.1에 digest로 고정되어 있습니다. 다른 버전은 README 참고
+// 필요한 자격(Manage Jenkins > Credentials): orbit-client-id, orbit-client-secret (Secret text)
+pipeline {
+    agent any   // Docker를 쓸 수 있는 에이전트
+
+    environment {
+        SCAN_TARGET         = 'vendor/commons-text-1.9.jar'
+        ORBIT_CLI_IMAGE     = 'ghcr.io/oliveworks-io/orbit-cli:2.0.1@sha256:ce55fd53b389998ee2fa125ca6e5baf944384c1f9c56f5ff2c8e9bbe1e6aceca'
+        ORBIT_CLIENT_ID     = credentials('orbit-client-id')
+        ORBIT_CLIENT_SECRET = credentials('orbit-client-secret')
+        // CLI 컨테이너에 넘길 환경변수. 컨테이너는 에이전트의 환경변수를 물려받지 않습니다.
+        ORBIT_ENV_ARGS      = '-e JENKINS_URL -e JOB_NAME -e GIT_URL -e GIT_COMMIT -e BUILD_NUMBER -e ORBIT_CLIENT_ID -e ORBIT_CLIENT_SECRET'
+    }
+
+    stages {
+        // 1) version: CLI와 SBOM 생성 엔진의 버전을 출력합니다. 서버에 접속하지 않습니다.
+        stage('orbit version') {
+            steps {
+                catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+                    sh 'docker run --rm "$ORBIT_CLI_IMAGE" version'
+                }
+            }
+        }
+
+        // 2) doctor: 자격과 빌드 좌표를 점검합니다. 서버에 접속하지 않습니다.
+        //    오류가 있으면 종료 코드 2로 stage가 실패합니다. 경고는 종료 코드를 바꾸지 않습니다.
+        stage('orbit doctor') {
+            steps {
+                catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+                    sh 'docker run --rm $ORBIT_ENV_ARGS "$ORBIT_CLI_IMAGE" doctor'
+                }
+            }
+        }
+
+        // 3) scan file: 빌드 산출물의 SBOM을 만들어 서버 판정을 받습니다.
+        //    종료 코드 0(통과)이 아니면 stage가 실패합니다. 1(차단)과 2(오류)는 gate.json과 로그로 구분합니다.
+        //    작업 폴더를 마운트하지 않고 docker cp로 넣어 dind·DooD 에이전트에서도 같게 동작합니다.
+        stage('orbit scan file') {
+            steps {
+                catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+                    script {
+                        def status = sh(returnStatus: true, script: '''
+                            # 산출물을 임시 폴더에 담아 폴더째 넣습니다. 파일을 그대로 넣으면 이름이 바뀌어 형식을 알아보지 못합니다.
+                            NAME="$(basename "$SCAN_TARGET")"
+                            TARGET_DIR="$(mktemp -d)"
+                            cp -R "$SCAN_TARGET" "$TARGET_DIR/"
+                            chmod -R a+rX "$TARGET_DIR"   # CLI는 비루트(65532)로 돕니다. mktemp 폴더(700)는 읽지 못합니다.
+                            CID="$(docker create $ORBIT_ENV_ARGS "$ORBIT_CLI_IMAGE" \
+                              scan file "/target/$NAME" --details --format json)"
+                            docker cp "$TARGET_DIR" "$CID:/target"
+                            set +e
+                            docker start -a "$CID" > gate.json
+                            STATUS=$?
+                            set -e
+                            docker rm "$CID" > /dev/null
+                            exit $STATUS
+                        ''')
+                        sh 'cat gate.json || echo "(판정 응답 없음)"'
+                        echo "scan file 종료 코드: ${status}"
+                        if (status != 0) { error("scan file 통과 아님 (exit=${status})") }
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        // 차단 사유는 판정 출력이 유일한 기록입니다. 결과와 관계없이 보관합니다.
+        always { archiveArtifacts artifacts: 'gate.json', allowEmptyArchive: true }
+    }
+}
