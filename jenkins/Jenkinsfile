@@ -6,6 +6,10 @@
 // 단계는 서로의 결과 변수에 기대지 않습니다. 필요 없는 stage는 블록째 지워도 나머지가 동작합니다.
 // 단, Build·Tag는 판정할 이미지를 만드는 단계라 scan image·Push·Promote를 쓰는 동안 남겨 둡니다.
 //
+// 에이전트: Kubernetes 플러그인으로 Pod(jnlp + docker:27-dind, privileged)를 띄우고,
+//           모든 stage를 dind 컨테이너 안에서 실행합니다. stage마다 dockerd 기동을 기다립니다.
+//           Docker가 있는 일반 에이전트에서 돌리려면 agent를 any로 바꾸고 container('dind') 블록을 걷어 냅니다.
+//
 // 필요한 자격(Manage Jenkins > Credentials)
 //   orbit-client-id, orbit-client-secret : Secret text
 //   레지스트리 자격                      : Username with password. ID를 REGISTRY_CREDENTIALS_ID에 적습니다(로그인하지 않으면 none).
@@ -24,7 +28,28 @@ def PUSH_SCRIPT = '''
 '''
 
 pipeline {
-    agent any   // Docker를 쓸 수 있는 에이전트
+    agent {
+        kubernetes {
+            yaml '''
+            apiVersion: v1
+            kind: Pod
+            spec:
+              containers:
+              - name: jnlp                      # 체크아웃·잡 제어 (git 포함)
+                resources:
+                  requests: {cpu: 100m, memory: 256Mi}
+              - name: dind                      # Docker 데몬 + CLI. 빌드·판정·push가 모두 여기서 돕니다
+                image: docker:27-dind
+                securityContext: {privileged: true}
+                env:
+                - {name: DOCKER_TLS_CERTDIR, value: ""}
+                resources:
+                  requests: {cpu: 250m, memory: 512Mi}
+                  limits:   {memory: 3Gi}       # CLI(Trivy)가 이 컨테이너 안에서 돕니다
+            '''
+        }
+    }
+    options { timeout(time: 20, unit: 'MINUTES') }
 
     environment {
         // ─── 여기만 바꿉니다 ────────────────────────────────────────────────
@@ -52,41 +77,53 @@ pipeline {
     stages {
         // 1) 푸시하지 않고 로컬에만 적재합니다.
         stage('Build') {
-            steps { sh 'docker build -t "$CANDIDATE_IMAGE" .' }
+            steps {
+                container('dind') {
+                    sh 'until docker info >/dev/null 2>&1; do sleep 1; done'   // dockerd 기동 대기
+                    sh 'docker build -t "$CANDIDATE_IMAGE" .'
+                }
+            }
         }
 
         // 2) 최종 이미지 참조를 붙입니다(푸시 아님). IMAGE를 설정하지 않았으면 여기서 멈춥니다.
         stage('Tag') {
             steps {
-                sh '''
-                    case "$IMAGE" in
-                      ''|*'<'*) echo "IMAGE를 설정하십시오. 예: registry.example.com/team/myapp / 시연: ttl.sh/orbit/orbit-gate-hello-<임의 문자열> (IMAGE_TAG=1h)"; exit 1 ;;
-                    esac
-                    docker tag "$CANDIDATE_IMAGE" "$IMAGE:${IMAGE_TAG:-$GIT_COMMIT}"
-                '''
+                container('dind') {
+                    sh 'until docker info >/dev/null 2>&1; do sleep 1; done'   // dockerd 기동 대기
+                    sh '''
+                        case "$IMAGE" in
+                          ''|*'<'*) echo "IMAGE를 설정하십시오. 예: registry.example.com/team/myapp / 시연: ttl.sh/orbit/orbit-gate-hello-<임의 문자열> (IMAGE_TAG=1h)"; exit 1 ;;
+                        esac
+                        docker tag "$CANDIDATE_IMAGE" "$IMAGE:${IMAGE_TAG:-$GIT_COMMIT}"
+                    '''
+                }
             }
         }
 
         // 3) 판정. 통과가 아닌 모든 경우(차단, 오류)에 중단합니다.
         stage('Orbit Security (scan image)') {
             steps {
-                script {
-                    def status = sh(returnStatus: true, script: '''
-                        REF="$IMAGE:${IMAGE_TAG:-$GIT_COMMIT}"
-                        # 도커 소켓의 그룹 ID는 컨테이너를 띄워서 측정합니다.
-                        SOCK_GID="$(docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-                          alpine:3 stat -c '%g' /var/run/docker.sock)"
-                        # 플랫폼(아키텍처)을 손으로 적지 않습니다. 빌드는 이 에이전트의 아키텍처로 만들어집니다.
-                        PLATFORM="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$REF")"
-                        docker run --rm $ORBIT_ENV_ARGS \
-                          --group-add "$SOCK_GID" \
-                          -v /var/run/docker.sock:/var/run/docker.sock \
-                          "$ORBIT_CLI_IMAGE" \
-                          scan image "$REF" --platform "$PLATFORM" --details --format json \
-                          > gate.json
-                    ''')
-                    sh 'cat gate.json || echo "(판정 응답 없음)"'
-                    if (status != 0) { error("게이트 차단/오류 (exit=${status})") }
+                container('dind') {
+                    script {
+                        sh 'until docker info >/dev/null 2>&1; do sleep 1; done'   // dockerd 기동 대기
+                        def status = sh(returnStatus: true, script: '''
+                            REF="$IMAGE:${IMAGE_TAG:-$GIT_COMMIT}"
+                            # 도커 소켓의 그룹 ID는 컨테이너를 띄워서 측정합니다.
+                            SOCK_GID="$(docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+                              alpine:3 stat -c '%g' /var/run/docker.sock)"
+                            # 플랫폼(아키텍처)을 손으로 적지 않습니다. 빌드는 이 노드의 아키텍처로 만들어집니다.
+                            # 소켓 경로는 dind 컨테이너 안의 dockerd 기준으로 해석됩니다.
+                            PLATFORM="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$REF")"
+                            docker run --rm $ORBIT_ENV_ARGS \
+                              --group-add "$SOCK_GID" \
+                              -v /var/run/docker.sock:/var/run/docker.sock \
+                              "$ORBIT_CLI_IMAGE" \
+                              scan image "$REF" --platform "$PLATFORM" --details --format json \
+                              > gate.json
+                        ''')
+                        sh 'cat gate.json || echo "(판정 응답 없음)"'
+                        if (status != 0) { error("게이트 차단/오류 (exit=${status})") }
+                    }
                 }
             }
         }
@@ -94,18 +131,21 @@ pipeline {
         // 4) 판정한 그 이미지를 그대로 올립니다.
         stage('Push') {
             steps {
-                script {
-                    def credId = env.REGISTRY_CREDENTIALS_ID?.trim() ?: ''
-                    if (credId == '' || credId.contains('<')) {
-                        error("REGISTRY_CREDENTIALS_ID를 정하십시오. 레지스트리 자격의 Credentials ID, 또는 로그인하지 않으려면 none")
-                    }
-                    if (credId != 'none') {
-                        withCredentials([usernamePassword(credentialsId: credId,
-                                usernameVariable: 'REGISTRY_USERNAME', passwordVariable: 'REGISTRY_TOKEN')]) {
+                container('dind') {
+                    script {
+                        sh 'until docker info >/dev/null 2>&1; do sleep 1; done'   // dockerd 기동 대기
+                        def credId = env.REGISTRY_CREDENTIALS_ID?.trim() ?: ''
+                        if (credId == '' || credId.contains('<')) {
+                            error("REGISTRY_CREDENTIALS_ID를 정하십시오. 레지스트리 자격의 Credentials ID, 또는 로그인하지 않으려면 none")
+                        }
+                        if (credId != 'none') {
+                            withCredentials([usernamePassword(credentialsId: credId,
+                                    usernameVariable: 'REGISTRY_USERNAME', passwordVariable: 'REGISTRY_TOKEN')]) {
+                                sh PUSH_SCRIPT
+                            }
+                        } else {
                             sh PUSH_SCRIPT
                         }
-                    } else {
-                        sh PUSH_SCRIPT
                     }
                 }
             }
@@ -115,15 +155,18 @@ pipeline {
         //    앞 단계를 지워 값이 없으면 건너뜁니다.
         stage('Orbit Promote (scan promote)') {
             steps {
-                sh '''
-                    REF="$IMAGE:${IMAGE_TAG:-$GIT_COMMIT}"
-                    REQUEST_ID="$(grep -o '"requestId" *: *"[^"]*"' gate.json 2>/dev/null | head -n 1 | cut -d'"' -f4 || true)"
-                    DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "$REF" 2>/dev/null | cut -d'@' -f2 || true)"
-                    [ -n "$REQUEST_ID" ] || { echo "gate.json에 requestId가 없어 보고하지 않습니다"; exit 0; }
-                    [ -n "$DIGEST" ]     || { echo "push된 digest가 없어 보고하지 않습니다"; exit 0; }
-                    docker run --rm $ORBIT_ENV_ARGS "$ORBIT_CLI_IMAGE" \
-                      scan promote --request-id "$REQUEST_ID" --image-digest "$DIGEST"
-                '''
+                container('dind') {
+                    sh 'until docker info >/dev/null 2>&1; do sleep 1; done'   // dockerd 기동 대기
+                    sh '''
+                        REF="$IMAGE:${IMAGE_TAG:-$GIT_COMMIT}"
+                        REQUEST_ID="$(grep -o '"requestId" *: *"[^"]*"' gate.json 2>/dev/null | head -n 1 | cut -d'"' -f4 || true)"
+                        DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "$REF" 2>/dev/null | cut -d'@' -f2 || true)"
+                        [ -n "$REQUEST_ID" ] || { echo "gate.json에 requestId가 없어 보고하지 않습니다"; exit 0; }
+                        [ -n "$DIGEST" ]     || { echo "push된 digest가 없어 보고하지 않습니다"; exit 0; }
+                        docker run --rm $ORBIT_ENV_ARGS "$ORBIT_CLI_IMAGE" \
+                          scan promote --request-id "$REQUEST_ID" --image-digest "$DIGEST"
+                    '''
+                }
             }
         }
     }

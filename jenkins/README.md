@@ -28,16 +28,14 @@ Declarative Pipeline에 Orbit CLI 빌드 게이트를 붙이는 예제입니다.
 
 ### 에이전트 조건
 
-두 파일이 쓰는 에이전트가 다릅니다.
+두 파일 모두 **Kubernetes Pod** 에이전트(`jnlp` + `docker:27-dind`)를 씁니다.
 
-| 파일 | 에이전트 | 필요한 것 |
-|---|---|---|
-| `Jenkinsfile.cli-test` | **Kubernetes Pod** (`jnlp` + `docker:27-dind`) | Jenkins Kubernetes 플러그인, Pod를 띄울 클라우드 설정, 그 네임스페이스에서 **privileged** 컨테이너 허용 |
-| `Jenkinsfile` | `agent any` | Docker를 실행할 수 있는 에이전트(도커 소켓 `/var/run/docker.sock` 사용) |
-
-- cli-test의 `dind` 컨테이너는 메모리 요청 512Mi, 한도 3Gi입니다. CLI(SBOM 생성 엔진 Trivy)가 이 컨테이너 안에서 돌기 때문에 한도를 크게 잡았습니다.
-- cli-test는 파이프라인 전체 시간 한도가 20분입니다(`options { timeout(...) }`).
-- Kubernetes가 없고 Docker가 있는 일반 에이전트에서 cli-test를 돌리려면 `agent`를 `any`로 바꾸고 각 stage의 `container('dind') { … }` 블록을 걷어 냅니다.
+- **필요한 것:** Jenkins Kubernetes 플러그인, Pod를 띄울 클라우드 설정, 그 네임스페이스에서 **privileged** 컨테이너 허용
+- 모든 stage는 `dind` 컨테이너 안에서 돌고, 시작할 때 dockerd가 뜰 때까지 기다립니다. stage끼리 의존하지 않도록 stage마다 기다립니다.
+- 빌드, 판정, push가 모두 `dind` 컨테이너의 dockerd에서 일어납니다. 판정 단계가 마운트하는 `/var/run/docker.sock`도 이 dockerd의 소켓입니다.
+- `dind` 컨테이너는 메모리 요청 512Mi, 한도 3Gi입니다. CLI(SBOM 생성 엔진 Trivy)가 이 컨테이너 안에서 돌기 때문에 한도를 크게 잡았습니다. 빌드할 이미지가 크면 늘립니다.
+- 파이프라인 전체 시간 한도는 20분입니다(`options { timeout(...) }`).
+- Kubernetes가 없고 Docker가 있는 일반 에이전트에서 돌리려면 `agent`를 `any`로 바꾸고 각 stage의 `container('dind') { … }` 블록을 걷어 냅니다.
 - CLI 이미지를 내려받을 수 있어야 합니다. 폐쇄망이면 내부 레지스트리에 미러링합니다. TBD
 
 ## 1단계: dry-run (`Jenkinsfile.cli-test`)
@@ -112,8 +110,8 @@ Orbit 자격 두 개만 있으면 됩니다. 이미지를 만들거나 올리지
 | `pipelineRef`가 `system:`으로 시작 | `-e JENKINS_URL`, `-e JOB_NAME`이 빠졌습니다. |
 | `sourceRef`가 비어 있음 | `checkout scm`을 쓰거나 `--source-ref`를 지정합니다. |
 | 자격 변수에 `_USR`, `_PSW`가 붙음 | Orbit 자격의 Credentials 유형을 `Secret text`로 바꿉니다. |
-| cli-test Pod가 만들어지지 않음 | 네임스페이스의 Pod Security 정책이 privileged 컨테이너를 막고 있을 수 있습니다. Kubernetes 클라우드 설정과 네임스페이스 정책을 확인합니다. |
-| cli-test stage가 시작 직후 멈춰 있다가 20분 뒤 실패 | dockerd가 뜨지 않아 기동 대기에서 멈춘 것입니다. `dind` 컨테이너 로그에서 privileged 거부나 메모리 부족을 확인합니다. |
+| Pod가 만들어지지 않음 | 네임스페이스의 Pod Security 정책이 privileged 컨테이너를 막고 있을 수 있습니다. Kubernetes 클라우드 설정과 네임스페이스 정책을 확인합니다. |
+| stage가 시작 직후 멈춰 있다가 20분 뒤 실패 | dockerd가 뜨지 않아 기동 대기에서 멈춘 것입니다. `dind` 컨테이너 로그에서 privileged 거부나 메모리 부족을 확인합니다. |
 | `IMAGE를 설정하십시오`로 멈춤 | `environment`의 `IMAGE`를 채웁니다. |
 | `REGISTRY_CREDENTIALS_ID를 정하십시오`로 멈춤 | Credentials ID 또는 `none`을 적습니다. |
 | 차단인데 단계가 그냥 실패함 | `returnStatus: true`가 빠졌습니다. |
@@ -122,6 +120,6 @@ Orbit 자격 두 개만 있으면 됩니다. 이미지를 만들거나 올리지
 
 ## 다음 단계
 
-- 본적용 템플릿(`Jenkinsfile`)의 쿠버네티스 에이전트 구성: TBD (cli-test는 Kubernetes Pod 구성을 씁니다)
+- Kaniko 등 privileged 없이 빌드하는 구성: TBD
 - 폐쇄망(`ORBIT_ADDRESS`, `ORBIT_ISSUER` 지정): [저장소 README](../README.md)의 "서버 주소와 발급자"
 - 도입 초기에 차단하지 않고 판정만 확인하는 방법: TBD
