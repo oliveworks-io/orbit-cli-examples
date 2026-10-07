@@ -8,13 +8,38 @@
 // stage는 서로 의존하지 않습니다. 필요 없는 stage는 블록째 지워도 됩니다.
 // 한 stage가 실패해도 다음 stage를 실행하도록 catchError로 감쌌습니다. 빌드 결과는 실패로 남습니다.
 //
+// 에이전트: Kubernetes 플러그인으로 Pod(jnlp + docker:27-dind, privileged)를 띄우고,
+//           모든 stage를 dind 컨테이너 안에서 실행합니다. stage마다 dockerd 기동을 기다립니다.
+//           Docker가 있는 일반 에이전트에서 돌리려면 agent를 any로 바꾸고 container('dind') 블록을 걷어 냅니다.
+//
 // 사용 전에 아래 값을 확인합니다.
 //   SCAN_TARGET     : scan file로 판정할 빌드 산출물 경로(저장소 기준). JAR, Go·Rust 바이너리,
 //                     rootfs 디렉터리 등. 소스 트리는 대상이 아닙니다.
 //   ORBIT_CLI_IMAGE : CLI 2.0.1에 digest로 고정되어 있습니다. 다른 버전은 README 참고
 // 필요한 자격(Manage Jenkins > Credentials): orbit-client-id, orbit-client-secret (Secret text)
 pipeline {
-    agent any   // Docker를 쓸 수 있는 에이전트
+    agent {
+        kubernetes {
+            yaml '''
+            apiVersion: v1
+            kind: Pod
+            spec:
+              containers:
+              - name: jnlp                      # 체크아웃·잡 제어 (git 포함)
+                resources:
+                  requests: {cpu: 100m, memory: 256Mi}
+              - name: dind                      # Docker 데몬 + CLI
+                image: docker:27-dind
+                securityContext: {privileged: true}
+                env:
+                - {name: DOCKER_TLS_CERTDIR, value: ""}
+                resources:
+                  requests: {cpu: 250m, memory: 512Mi}
+                  limits:   {memory: 3Gi}       # CLI(Trivy)가 이 컨테이너 안에서 돕니다
+            '''
+        }
+    }
+    options { timeout(time: 20, unit: 'MINUTES') } 
 
     environment {
         SCAN_TARGET         = 'vendor/commons-text-1.9.jar'
@@ -30,7 +55,10 @@ pipeline {
         stage('orbit version') {
             steps {
                 catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
-                    sh 'docker run --rm "$ORBIT_CLI_IMAGE" version'
+                     container('dind') {
+                        sh 'until docker info >/dev/null 2>&1; do sleep 1; done'   // dockerd 기동 대기
+                        sh 'docker run --rm "$ORBIT_CLI_IMAGE" version'
+                    }
                 }
             }
         }
@@ -40,7 +68,11 @@ pipeline {
         stage('orbit doctor') {
             steps {
                 catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
-                    sh 'docker run --rm $ORBIT_ENV_ARGS "$ORBIT_CLI_IMAGE" doctor'
+                    
+                     container('dind') {
+                        sh 'until docker info >/dev/null 2>&1; do sleep 1; done'   // dockerd 기동 대기
+                        sh 'docker run --rm $ORBIT_ENV_ARGS "$ORBIT_CLI_IMAGE" doctor'
+                    }
                 }
             }
         }
@@ -50,27 +82,33 @@ pipeline {
         //    작업 폴더를 마운트하지 않고 docker cp로 넣어 dind·DooD 에이전트에서도 같게 동작합니다.
         stage('orbit scan file') {
             steps {
-                catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
-                    script {
-                        def status = sh(returnStatus: true, script: '''
-                            # 산출물을 임시 폴더에 담아 폴더째 넣습니다. 파일을 그대로 넣으면 이름이 바뀌어 형식을 알아보지 못합니다.
-                            NAME="$(basename "$SCAN_TARGET")"
-                            TARGET_DIR="$(mktemp -d)"
-                            cp -R "$SCAN_TARGET" "$TARGET_DIR/"
-                            chmod -R a+rX "$TARGET_DIR"   # CLI는 비루트(65532)로 돕니다. mktemp 폴더(700)는 읽지 못합니다.
-                            CID="$(docker create $ORBIT_ENV_ARGS "$ORBIT_CLI_IMAGE" \
-                              scan file "/target/$NAME" --details --format json)"
-                            docker cp "$TARGET_DIR" "$CID:/target"
-                            set +e
-                            docker start -a "$CID" > gate.json
-                            STATUS=$?
-                            set -e
-                            docker rm "$CID" > /dev/null
-                            exit $STATUS
-                        ''')
-                        sh 'cat gate.json || echo "(판정 응답 없음)"'
-                        echo "scan file 종료 코드: ${status}"
-                        if (status != 0) { error("scan file 통과 아님 (exit=${status})") }
+                 catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+                    container('dind') {   // Docker CLI·데몬은 dind 컨테이너에만 있습니다
+                        script {
+                            // stage 끼리 의존하지 않도록 여기서도 dockerd 기동을 기다립니다
+                            sh 'until docker info >/dev/null 2>&1; do sleep 1; done'
+
+                            def status = sh(returnStatus: true, script: '''
+                                # 산출물을 임시 폴더에 담아 폴더째 넣습니다. 파일을 그대로 넣으면 이름이 바뀌어 형식을 알아보지 못합니다.
+                                NAME="$(basename "$SCAN_TARGET")"
+                                TARGET_DIR="$(mktemp -d)"
+                                cp -R "$SCAN_TARGET" "$TARGET_DIR/"
+                                chmod -R a+rX "$TARGET_DIR"   # CLI는 비루트(65532)로 돕니다. mktemp 폴더(700)는 읽지 못합니다.
+                                CID="$(docker create $ORBIT_ENV_ARGS "$ORBIT_CLI_IMAGE" \
+                                  scan file "/target/$NAME" --details --format json)"
+                                docker cp "$TARGET_DIR" "$CID:/target"
+                                set +e
+                                docker start -a "$CID" > gate.json
+                                STATUS=$?
+                                set -e
+                                docker rm "$CID" > /dev/null
+                                rm -rf "$TARGET_DIR"
+                                exit $STATUS
+                            ''')
+                            sh 'cat gate.json || echo "(판정 응답 없음)"'
+                            echo "scan file 종료 코드: ${status}"
+                            if (status != 0) { error("scan file 통과 아님 (exit=${status})") }
+                        }
                     }
                 }
             }
