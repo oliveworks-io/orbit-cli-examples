@@ -17,6 +17,45 @@
 //                     rootfs 디렉터리 등. 소스 트리는 대상이 아닙니다.
 //   ORBIT_CLI_IMAGE : CLI 2.0.1에 digest로 고정되어 있습니다. 다른 버전은 README 참고
 // 필요한 자격(Manage Jenkins > Credentials): orbit-client-id, orbit-client-secret (Secret text)
+//   설치형(폐쇄망)은 orbit-address, orbit-issuer(Secret text)도 등록합니다. 아래 ORBIT_*_CREDENTIALS_ID 참고
+// Orbit 서버 주소(ORBIT_ADDRESS, ORBIT_ISSUER)를 Jenkins Credentials에서 읽어 body를 실행합니다.
+//   두 Credentials가 모두 있으면 : 그 값을 CLI 컨테이너에 -e로 넘깁니다. 값은 콘솔 로그에서 가려집니다.
+//   둘 다 없으면                 : 아무것도 넘기지 않아 CLI 이미지의 기본값(SaaS)을 씁니다.
+//                                  빈 값을 -e로 넘기면 기본값을 덮어쓰므로 넘기지 않습니다.
+//   하나만 있으면                : 서버와 인증 서버가 다른 환경을 가리킬 수 있어 멈춥니다.
+// body 안의 docker 명령은 $ORBIT_SERVER_ARGS를 붙여 씁니다.
+def withOrbitServer(Closure body) {
+    def addressId = env.ORBIT_ADDRESS_CREDENTIALS_ID?.trim() ?: ''
+    def issuerId  = env.ORBIT_ISSUER_CREDENTIALS_ID?.trim() ?: ''
+    def hasAddress = orbitCredentialExists(addressId)
+    def hasIssuer  = orbitCredentialExists(issuerId)
+    if (hasAddress != hasIssuer) {
+        error("ORBIT_ADDRESS와 ORBIT_ISSUER Credentials는 둘 다 등록하거나 둘 다 지웁니다 (있는 것: ${hasAddress ? addressId : issuerId})")
+    }
+    if (!hasAddress) {
+        echo 'Orbit 서버: Credentials가 없어 CLI 이미지 기본값(SaaS)을 씁니다'
+        withEnv(['ORBIT_SERVER_ARGS=']) { body() }
+        return
+    }
+    echo 'Orbit 서버: Credentials의 주소를 씁니다(로그에서 가려집니다)'
+    withCredentials([string(credentialsId: addressId, variable: 'ORBIT_ADDRESS'),
+                     string(credentialsId: issuerId,  variable: 'ORBIT_ISSUER')]) {
+        withEnv(['ORBIT_SERVER_ARGS=-e ORBIT_ADDRESS -e ORBIT_ISSUER']) { body() }
+    }
+}
+
+// 해당 ID의 Secret text Credentials가 있으면 true. 없으면 false, 그 밖의 오류는 그대로 던집니다.
+def orbitCredentialExists(String id) {
+    if (!id) { return false }
+    try {
+        withCredentials([string(credentialsId: id, variable: 'ORBIT_CREDENTIAL_PROBE')]) { }
+        return true
+    } catch (Exception e) {
+        if (e.getMessage()?.contains('Could not find credentials')) { return false }
+        throw e
+    }
+}
+
 pipeline {
     agent {
         kubernetes {
@@ -43,6 +82,13 @@ pipeline {
 
     environment {
         SCAN_TARGET         = 'vendor/commons-text-1.9.jar'
+        // Orbit 서버 주소. 설치형(폐쇄망)만 해당하며, SaaS는 Credentials를 만들지 않으면 됩니다.
+        // 주소가 파일과 로그에 드러나지 않도록 Secret text Credentials로 등록하고 그 ID를 적습니다.
+        // 두 Credentials가 모두 있으면 그 값을, 둘 다 없으면 CLI 이미지 기본값(SaaS)을 씁니다. 하나만 있으면 멈춥니다.
+        //   ORBIT_ADDRESS : pipelinegate 주소.  값 예: https://gate.<설치 도메인>
+        //   ORBIT_ISSUER  : Keycloak realm 주소. 값 예: https://sso.<설치 도메인>/realms/<realm 이름>
+        ORBIT_ADDRESS_CREDENTIALS_ID = 'orbit-address'
+        ORBIT_ISSUER_CREDENTIALS_ID  = 'orbit-issuer'
         ORBIT_CLI_IMAGE     = 'ghcr.io/oliveworks-io/orbit-cli:2.0.1@sha256:ce55fd53b389998ee2fa125ca6e5baf944384c1f9c56f5ff2c8e9bbe1e6aceca'
         ORBIT_CLIENT_ID     = credentials('orbit-client-id')
         ORBIT_CLIENT_SECRET = credentials('orbit-client-secret')
@@ -68,10 +114,13 @@ pipeline {
         stage('orbit doctor') {
             steps {
                 catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
-                    
-                     container('dind') {
+                    container('dind') {
                         sh 'until docker info >/dev/null 2>&1; do sleep 1; done'   // dockerd 기동 대기
-                        sh 'docker run --rm $ORBIT_ENV_ARGS "$ORBIT_CLI_IMAGE" doctor'
+                        script {
+                            withOrbitServer {
+                                sh 'docker run --rm $ORBIT_ENV_ARGS $ORBIT_SERVER_ARGS "$ORBIT_CLI_IMAGE" doctor'
+                            }
+                        }
                     }
                 }
             }
@@ -88,23 +137,26 @@ pipeline {
                             // stage 끼리 의존하지 않도록 여기서도 dockerd 기동을 기다립니다
                             sh 'until docker info >/dev/null 2>&1; do sleep 1; done'
 
-                            def status = sh(returnStatus: true, script: '''
-                                # 산출물을 임시 폴더에 담아 폴더째 넣습니다. 파일을 그대로 넣으면 이름이 바뀌어 형식을 알아보지 못합니다.
-                                NAME="$(basename "$SCAN_TARGET")"
-                                TARGET_DIR="$(mktemp -d)"
-                                cp -R "$SCAN_TARGET" "$TARGET_DIR/"
-                                chmod -R a+rX "$TARGET_DIR"   # CLI는 비루트(65532)로 돕니다. mktemp 폴더(700)는 읽지 못합니다.
-                                CID="$(docker create $ORBIT_ENV_ARGS "$ORBIT_CLI_IMAGE" \
-                                  scan file "/target/$NAME" --details --format json)"
-                                docker cp "$TARGET_DIR" "$CID:/target"
-                                set +e
-                                docker start -a "$CID" > gate.json
-                                STATUS=$?
-                                set -e
-                                docker rm "$CID" > /dev/null
-                                rm -rf "$TARGET_DIR"
-                                exit $STATUS
-                            ''')
+                            def status = 0
+                            withOrbitServer {
+                                status = sh(returnStatus: true, script: '''
+                                    # 산출물을 임시 폴더에 담아 폴더째 넣습니다. 파일을 그대로 넣으면 이름이 바뀌어 형식을 알아보지 못합니다.
+                                    NAME="$(basename "$SCAN_TARGET")"
+                                    TARGET_DIR="$(mktemp -d)"
+                                    cp -R "$SCAN_TARGET" "$TARGET_DIR/"
+                                    chmod -R a+rX "$TARGET_DIR"   # CLI는 비루트(65532)로 돕니다. mktemp 폴더(700)는 읽지 못합니다.
+                                    CID="$(docker create $ORBIT_ENV_ARGS $ORBIT_SERVER_ARGS "$ORBIT_CLI_IMAGE" \
+                                      scan file "/target/$NAME" --details --format json)"
+                                    docker cp "$TARGET_DIR" "$CID:/target"
+                                    set +e
+                                    docker start -a "$CID" > gate.json
+                                    STATUS=$?
+                                    set -e
+                                    docker rm "$CID" > /dev/null
+                                    rm -rf "$TARGET_DIR"
+                                    exit $STATUS
+                                ''')
+                            }
                             sh 'cat gate.json || echo "(판정 응답 없음)"'
                             echo "scan file 종료 코드: ${status}"
                             if (status != 0) { error("scan file 통과 아님 (exit=${status})") }

@@ -23,8 +23,22 @@ Declarative Pipeline에 Orbit CLI 빌드 게이트를 붙이는 예제입니다.
 | `orbit-client-id` | **Secret text** | CI 인증 키의 client_id | 둘 다 |
 | `orbit-client-secret` | **Secret text** | CI 인증 키의 client_secret | 둘 다 |
 | 원하는 ID | **Username with password** | 레지스트리 사용자 이름, 액세스 토큰 | `Jenkinsfile`, 로그인이 필요한 레지스트리만 |
+| `orbit-address` | **Secret text** | 서버(pipelinegate) 주소. 예: `https://gate.<설치 도메인>` | 둘 다, 설치형(폐쇄망)만 |
+| `orbit-issuer` | **Secret text** | 인증 서버(Keycloak realm) 주소. 예: `https://sso.<설치 도메인>/realms/<realm 이름>` | 둘 다, 설치형(폐쇄망)만 |
 
 > Orbit 자격 두 개는 반드시 `Secret text`로 등록합니다. Username/Password로 등록하면 `credentials()`가 `_USR`, `_PSW` 접미 변수를 만들어 변수 이름이 어긋납니다. 레지스트리 자격은 그 ID를 `Jenkinsfile`의 `REGISTRY_CREDENTIALS_ID`에 적으면 Push 단계에서만 `withCredentials`로 꺼내 씁니다.
+
+### 설치형(폐쇄망) 서버 주소
+
+SaaS는 서버 주소가 CLI 이미지에 들어 있어 아무것도 등록하지 않습니다. 설치형은 위 표의 `orbit-address`, `orbit-issuer`를 등록합니다.
+
+- 두 파일 모두 서버에 접속하는 stage(`scan image`, `scan promote`, `doctor`, `scan file`)에서 이 두 Credentials를 찾습니다.
+  - **둘 다 있으면** 그 값을 `ORBIT_ADDRESS`, `ORBIT_ISSUER`로 CLI에 넘깁니다. `withCredentials`로 꺼내므로 콘솔 로그에서 `****`로 가려져, 내부 주소가 로그에 남지 않습니다.
+  - **둘 다 없으면** 아무것도 넘기지 않고 CLI 이미지의 기본값(SaaS)을 씁니다. 빈 값을 넘기면 기본값을 덮어쓰기 때문에 넘기지 않습니다.
+  - **하나만 있으면** 서버와 인증 서버가 다른 환경을 가리킬 수 있어 멈춥니다.
+- 다른 ID로 등록했다면 `environment`의 `ORBIT_ADDRESS_CREDENTIALS_ID`, `ORBIT_ISSUER_CREDENTIALS_ID`를 그 ID로 바꿉니다.
+- 값은 `http://` 또는 `https://`로 시작해야 합니다. 스킴이 없으면 CLI가 SBOM을 만들기 전에 거부합니다.
+- 로그 첫머리의 `Orbit 서버: Credentials의 주소를 씁니다` 또는 `… 기본값(SaaS)을 씁니다`로 어느 쪽이 쓰였는지 확인합니다.
 
 ### 에이전트 조건
 
@@ -112,6 +126,8 @@ Orbit 자격 두 개만 있으면 됩니다. 이미지를 만들거나 올리지
 | 자격 변수에 `_USR`, `_PSW`가 붙음 | Orbit 자격의 Credentials 유형을 `Secret text`로 바꿉니다. |
 | Pod가 만들어지지 않음 | 네임스페이스의 Pod Security 정책이 privileged 컨테이너를 막고 있을 수 있습니다. Kubernetes 클라우드 설정과 네임스페이스 정책을 확인합니다. |
 | stage가 시작 직후 멈춰 있다가 20분 뒤 실패 | dockerd가 뜨지 않아 기동 대기에서 멈춘 것입니다. `dind` 컨테이너 로그에서 privileged 거부나 메모리 부족을 확인합니다. |
+| `ORBIT_ADDRESS와 ORBIT_ISSUER Credentials는 둘 다 등록하거나 둘 다 지웁니다`로 멈춤 | 두 Credentials 중 하나만 있습니다. 나머지도 등록하거나 둘 다 지웁니다. |
+| 설치형인데 `토큰 엔드포인트에 도달하지 못했다` | Credentials가 없어 SaaS 주소로 접속했을 수 있습니다. 로그의 `Orbit 서버:` 줄과 Credentials ID를 확인합니다. |
 | `IMAGE를 설정하십시오`로 멈춤 | `environment`의 `IMAGE`를 채웁니다. |
 | `REGISTRY_CREDENTIALS_ID를 정하십시오`로 멈춤 | Credentials ID 또는 `none`을 적습니다. |
 | 차단인데 단계가 그냥 실패함 | `returnStatus: true`가 빠졌습니다. |
@@ -121,5 +137,5 @@ Orbit 자격 두 개만 있으면 됩니다. 이미지를 만들거나 올리지
 ## 다음 단계
 
 - Kaniko 등 privileged 없이 빌드하는 구성: TBD
-- 폐쇄망(`ORBIT_ADDRESS`, `ORBIT_ISSUER` 지정): [저장소 README](../README.md)의 "서버 주소와 발급자"
+- 폐쇄망 서버 주소: 위 "설치형(폐쇄망) 서버 주소". 공통 설명은 [저장소 README](../README.md)의 "서버 주소와 발급자"
 - 도입 초기에 차단하지 않고 판정만 확인하는 방법: TBD

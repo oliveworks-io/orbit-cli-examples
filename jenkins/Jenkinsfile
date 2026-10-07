@@ -12,6 +12,7 @@
 //
 // 필요한 자격(Manage Jenkins > Credentials)
 //   orbit-client-id, orbit-client-secret : Secret text
+//   orbit-address, orbit-issuer          : Secret text. 설치형(폐쇄망)만. 아래 ORBIT_*_CREDENTIALS_ID 참고
 //   레지스트리 자격                      : Username with password. ID를 REGISTRY_CREDENTIALS_ID에 적습니다(로그인하지 않으면 none).
 
 // 판정한 이미지를 올립니다. Push 단계가 REGISTRY_CREDENTIALS_ID로 자격을 넘겼을 때만 로그인하고(none이면 넘기지 않음),
@@ -26,6 +27,44 @@ def PUSH_SCRIPT = '''
     fi
     docker push "$REF"
 '''
+
+// Orbit 서버 주소(ORBIT_ADDRESS, ORBIT_ISSUER)를 Jenkins Credentials에서 읽어 body를 실행합니다.
+//   두 Credentials가 모두 있으면 : 그 값을 CLI 컨테이너에 -e로 넘깁니다. 값은 콘솔 로그에서 가려집니다.
+//   둘 다 없으면                 : 아무것도 넘기지 않아 CLI 이미지의 기본값(SaaS)을 씁니다.
+//                                  빈 값을 -e로 넘기면 기본값을 덮어쓰므로 넘기지 않습니다.
+//   하나만 있으면                : 서버와 인증 서버가 다른 환경을 가리킬 수 있어 멈춥니다.
+// body 안의 docker 명령은 $ORBIT_SERVER_ARGS를 붙여 씁니다.
+def withOrbitServer(Closure body) {
+    def addressId = env.ORBIT_ADDRESS_CREDENTIALS_ID?.trim() ?: ''
+    def issuerId  = env.ORBIT_ISSUER_CREDENTIALS_ID?.trim() ?: ''
+    def hasAddress = orbitCredentialExists(addressId)
+    def hasIssuer  = orbitCredentialExists(issuerId)
+    if (hasAddress != hasIssuer) {
+        error("ORBIT_ADDRESS와 ORBIT_ISSUER Credentials는 둘 다 등록하거나 둘 다 지웁니다 (있는 것: ${hasAddress ? addressId : issuerId})")
+    }
+    if (!hasAddress) {
+        echo 'Orbit 서버: Credentials가 없어 CLI 이미지 기본값(SaaS)을 씁니다'
+        withEnv(['ORBIT_SERVER_ARGS=']) { body() }
+        return
+    }
+    echo 'Orbit 서버: Credentials의 주소를 씁니다(로그에서 가려집니다)'
+    withCredentials([string(credentialsId: addressId, variable: 'ORBIT_ADDRESS'),
+                     string(credentialsId: issuerId,  variable: 'ORBIT_ISSUER')]) {
+        withEnv(['ORBIT_SERVER_ARGS=-e ORBIT_ADDRESS -e ORBIT_ISSUER']) { body() }
+    }
+}
+
+// 해당 ID의 Secret text Credentials가 있으면 true. 없으면 false, 그 밖의 오류는 그대로 던집니다.
+def orbitCredentialExists(String id) {
+    if (!id) { return false }
+    try {
+        withCredentials([string(credentialsId: id, variable: 'ORBIT_CREDENTIAL_PROBE')]) { }
+        return true
+    } catch (Exception e) {
+        if (e.getMessage()?.contains('Could not find credentials')) { return false }
+        throw e
+    }
+}
 
 pipeline {
     agent {
@@ -63,6 +102,13 @@ pipeline {
         //   Credentials ID : 그 자격(Username with password)으로 로그인합니다.
         //   none           : 로그인하지 않습니다. ttl.sh나 이미 로그인된 에이전트일 때만 씁니다.
         REGISTRY_CREDENTIALS_ID = '<Credentials ID 또는 none>'
+        // Orbit 서버 주소. 설치형(폐쇄망)만 해당하며, SaaS는 Credentials를 만들지 않으면 됩니다.
+        // 주소가 파일과 로그에 드러나지 않도록 Secret text Credentials로 등록하고 그 ID를 적습니다.
+        // 두 Credentials가 모두 있으면 그 값을, 둘 다 없으면 CLI 이미지 기본값(SaaS)을 씁니다. 하나만 있으면 멈춥니다.
+        //   ORBIT_ADDRESS : pipelinegate 주소.  값 예: https://gate.<설치 도메인>
+        //   ORBIT_ISSUER  : Keycloak realm 주소. 값 예: https://sso.<설치 도메인>/realms/<realm 이름>
+        ORBIT_ADDRESS_CREDENTIALS_ID = 'orbit-address'
+        ORBIT_ISSUER_CREDENTIALS_ID  = 'orbit-issuer'
         // ───────────────────────────────────────────────────────────────────
 
         CANDIDATE_IMAGE     = 'orbit-gate-candidate:local'
@@ -106,21 +152,24 @@ pipeline {
                 container('dind') {
                     script {
                         sh 'until docker info >/dev/null 2>&1; do sleep 1; done'   // dockerd 기동 대기
-                        def status = sh(returnStatus: true, script: '''
-                            REF="$IMAGE:${IMAGE_TAG:-$GIT_COMMIT}"
-                            # 도커 소켓의 그룹 ID는 컨테이너를 띄워서 측정합니다.
-                            SOCK_GID="$(docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-                              alpine:3 stat -c '%g' /var/run/docker.sock)"
-                            # 플랫폼(아키텍처)을 손으로 적지 않습니다. 빌드는 이 노드의 아키텍처로 만들어집니다.
-                            # 소켓 경로는 dind 컨테이너 안의 dockerd 기준으로 해석됩니다.
-                            PLATFORM="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$REF")"
-                            docker run --rm $ORBIT_ENV_ARGS \
-                              --group-add "$SOCK_GID" \
-                              -v /var/run/docker.sock:/var/run/docker.sock \
-                              "$ORBIT_CLI_IMAGE" \
-                              scan image "$REF" --platform "$PLATFORM" --details --format json \
-                              > gate.json
-                        ''')
+                        def status = 0
+                        withOrbitServer {
+                            status = sh(returnStatus: true, script: '''
+                                REF="$IMAGE:${IMAGE_TAG:-$GIT_COMMIT}"
+                                # 도커 소켓의 그룹 ID는 컨테이너를 띄워서 측정합니다.
+                                SOCK_GID="$(docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+                                  alpine:3 stat -c '%g' /var/run/docker.sock)"
+                                # 플랫폼(아키텍처)을 손으로 적지 않습니다. 빌드는 이 노드의 아키텍처로 만들어집니다.
+                                # 소켓 경로는 dind 컨테이너 안의 dockerd 기준으로 해석됩니다.
+                                PLATFORM="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$REF")"
+                                docker run --rm $ORBIT_ENV_ARGS $ORBIT_SERVER_ARGS \
+                                  --group-add "$SOCK_GID" \
+                                  -v /var/run/docker.sock:/var/run/docker.sock \
+                                  "$ORBIT_CLI_IMAGE" \
+                                  scan image "$REF" --platform "$PLATFORM" --details --format json \
+                                  > gate.json
+                            ''')
+                        }
                         sh 'cat gate.json || echo "(판정 응답 없음)"'
                         if (status != 0) { error("게이트 차단/오류 (exit=${status})") }
                     }
@@ -157,15 +206,19 @@ pipeline {
             steps {
                 container('dind') {
                     sh 'until docker info >/dev/null 2>&1; do sleep 1; done'   // dockerd 기동 대기
-                    sh '''
-                        REF="$IMAGE:${IMAGE_TAG:-$GIT_COMMIT}"
-                        REQUEST_ID="$(grep -o '"requestId" *: *"[^"]*"' gate.json 2>/dev/null | head -n 1 | cut -d'"' -f4 || true)"
-                        DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "$REF" 2>/dev/null | cut -d'@' -f2 || true)"
-                        [ -n "$REQUEST_ID" ] || { echo "gate.json에 requestId가 없어 보고하지 않습니다"; exit 0; }
-                        [ -n "$DIGEST" ]     || { echo "push된 digest가 없어 보고하지 않습니다"; exit 0; }
-                        docker run --rm $ORBIT_ENV_ARGS "$ORBIT_CLI_IMAGE" \
-                          scan promote --request-id "$REQUEST_ID" --image-digest "$DIGEST"
-                    '''
+                    script {
+                        withOrbitServer {
+                            sh '''
+                                REF="$IMAGE:${IMAGE_TAG:-$GIT_COMMIT}"
+                                REQUEST_ID="$(grep -o '"requestId" *: *"[^"]*"' gate.json 2>/dev/null | head -n 1 | cut -d'"' -f4 || true)"
+                                DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "$REF" 2>/dev/null | cut -d'@' -f2 || true)"
+                                [ -n "$REQUEST_ID" ] || { echo "gate.json에 requestId가 없어 보고하지 않습니다"; exit 0; }
+                                [ -n "$DIGEST" ]     || { echo "push된 digest가 없어 보고하지 않습니다"; exit 0; }
+                                docker run --rm $ORBIT_ENV_ARGS $ORBIT_SERVER_ARGS "$ORBIT_CLI_IMAGE" \
+                                  scan promote --request-id "$REQUEST_ID" --image-digest "$DIGEST"
+                            '''
+                        }
+                    }
                 }
             }
         }
