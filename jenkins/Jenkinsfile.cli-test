@@ -8,6 +8,10 @@
 // stage는 서로 의존하지 않습니다. 필요 없는 stage는 블록째 지워도 됩니다.
 // 한 stage가 실패해도 다음 stage를 실행하도록 catchError로 감쌌습니다. 빌드 결과는 실패로 남습니다.
 //
+// 에이전트: Kubernetes 플러그인으로 Pod(jnlp + docker:27-dind, privileged)를 띄우고,
+//           모든 stage를 dind 컨테이너 안에서 실행합니다. stage마다 dockerd 기동을 기다립니다.
+//           Docker가 있는 일반 에이전트에서 돌리려면 agent를 any로 바꾸고 container('dind') 블록을 걷어 냅니다.
+//
 // 사용 전에 아래 값을 확인합니다.
 //   SCAN_TARGET     : scan file로 판정할 빌드 산출물 경로(저장소 기준). JAR, Go·Rust 바이너리,
 //                     rootfs 디렉터리 등. 소스 트리는 대상이 아닙니다.
