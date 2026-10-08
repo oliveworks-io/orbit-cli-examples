@@ -95,13 +95,13 @@ pipeline {
         // 판정하고 올릴 이미지. 예: registry.example.com/team/myapp
         // 첫 부분(registry.example.com)이 레지스트리 주소이며, push와 로그인 모두 이 주소로 갑니다.
         // 시연: ttl.sh/orbit/orbit-gate-hello-<임의 문자열> + IMAGE_TAG = '1h' (자격 불필요, 공개됨)
-        IMAGE                   = '<레지스트리>/<네임스페이스>/<이름>'
+        IMAGE                   = 'ttl.sh/orbit/orbit-gate-hello-default'
         // 비우면 커밋 해시를 태그로 씁니다.
-        IMAGE_TAG               = ''
+        IMAGE_TAG               = '1h'
         // 레지스트리 로그인. 둘 중 하나를 반드시 적습니다. 정하지 않으면 Push에서 멈춥니다.
         //   Credentials ID : 그 자격(Username with password)으로 로그인합니다.
         //   none           : 로그인하지 않습니다. ttl.sh나 이미 로그인된 에이전트일 때만 씁니다.
-        REGISTRY_CREDENTIALS_ID = '<Credentials ID 또는 none>'
+        REGISTRY_CREDENTIALS_ID = 'none'
         // Orbit 서버 주소. 설치형(폐쇄망)만 해당하며, SaaS는 Credentials를 만들지 않으면 됩니다.
         // 주소가 파일과 로그에 드러나지 않도록 Secret text Credentials로 등록하고 그 ID를 적습니다.
         // 두 Credentials가 모두 있으면 그 값을, 둘 다 없으면 CLI 이미지 기본값(SaaS)을 씁니다. 하나만 있으면 멈춥니다.

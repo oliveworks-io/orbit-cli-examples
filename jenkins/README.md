@@ -9,6 +9,7 @@ Declarative Pipeline에 Orbit CLI 빌드 게이트를 붙이는 예제입니다.
 |:-:|---|---|
 | 1 | [`Jenkinsfile.cli-test`](Jenkinsfile.cli-test) | **dry-run.** 이미지를 만들거나 올리지 않고 `version`, `doctor`, `scan file`로 자격·네트워크·서버 판정이 통하는지 확인합니다. |
 | 2 | [`Jenkinsfile`](Jenkinsfile) | **본적용 템플릿.** 자기 파이프라인에 복사해 씁니다. 이미지를 판정하고(`scan image`), 올린 뒤 확정 digest를 보고합니다(`scan promote`). |
+| 2 (시연) | [`Jenkinsfile.default`](Jenkinsfile.default) | `Jenkinsfile`과 같고, 입력 블록을 ttl.sh 시연 값(`IMAGE=ttl.sh/orbit/orbit-gate-hello-default`, `IMAGE_TAG=1h`, `REGISTRY_CREDENTIALS_ID=none`)으로 미리 채운 파일입니다. 가입 없이 이 저장소를 바로 시연할 때 씁니다. ttl.sh에 올린 이미지는 누구나 받을 수 있습니다. |
 
 공통 사전 준비(CI 인증 키, CLI 이미지 digest, 레지스트리)와 공통 원칙은 [저장소 README](../README.md)에 있습니다.
 
@@ -23,8 +24,22 @@ Declarative Pipeline에 Orbit CLI 빌드 게이트를 붙이는 예제입니다.
 | `orbit-client-id` | **Secret text** | CI 인증 키의 client_id | 둘 다 |
 | `orbit-client-secret` | **Secret text** | CI 인증 키의 client_secret | 둘 다 |
 | 원하는 ID | **Username with password** | 레지스트리 사용자 이름, 액세스 토큰 | `Jenkinsfile`, 로그인이 필요한 레지스트리만 |
+| `orbit-address` | **Secret text** | 서버(pipelinegate) 주소. 예: `https://gate.<설치 도메인>` | 둘 다, 설치형(폐쇄망)만 |
+| `orbit-issuer` | **Secret text** | 인증 서버(Keycloak realm) 주소. 예: `https://sso.<설치 도메인>/realms/<realm 이름>` | 둘 다, 설치형(폐쇄망)만 |
 
 > Orbit 자격 두 개는 반드시 `Secret text`로 등록합니다. Username/Password로 등록하면 `credentials()`가 `_USR`, `_PSW` 접미 변수를 만들어 변수 이름이 어긋납니다. 레지스트리 자격은 그 ID를 `Jenkinsfile`의 `REGISTRY_CREDENTIALS_ID`에 적으면 Push 단계에서만 `withCredentials`로 꺼내 씁니다.
+
+### 설치형(폐쇄망) 서버 주소
+
+SaaS는 서버 주소가 CLI 이미지에 들어 있어 아무것도 등록하지 않습니다. 설치형은 위 표의 `orbit-address`, `orbit-issuer`를 등록합니다.
+
+- 두 파일 모두 서버에 접속하는 stage(`scan image`, `scan promote`, `doctor`, `scan file`)에서 이 두 Credentials를 찾습니다.
+  - **둘 다 있으면** 그 값을 `ORBIT_ADDRESS`, `ORBIT_ISSUER`로 CLI에 넘깁니다. `withCredentials`로 꺼내므로 콘솔 로그에서 `****`로 가려져, 내부 주소가 로그에 남지 않습니다.
+  - **둘 다 없으면** 아무것도 넘기지 않고 CLI 이미지의 기본값(SaaS)을 씁니다. 빈 값을 넘기면 기본값을 덮어쓰기 때문에 넘기지 않습니다.
+  - **하나만 있으면** 서버와 인증 서버가 다른 환경을 가리킬 수 있어 멈춥니다.
+- 다른 ID로 등록했다면 `environment`의 `ORBIT_ADDRESS_CREDENTIALS_ID`, `ORBIT_ISSUER_CREDENTIALS_ID`를 그 ID로 바꿉니다.
+- 값은 `http://` 또는 `https://`로 시작해야 합니다. 스킴이 없으면 CLI가 SBOM을 만들기 전에 거부합니다.
+- 로그 첫머리의 `Orbit 서버: Credentials의 주소를 씁니다` 또는 `… 기본값(SaaS)을 씁니다`로 어느 쪽이 쓰였는지 확인합니다.
 
 ### 에이전트 조건
 
