@@ -114,10 +114,13 @@ pipeline {
         stage('orbit doctor') {
             steps {
                 catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
-                    
-                     container('dind') {
+                    container('dind') {
                         sh 'until docker info >/dev/null 2>&1; do sleep 1; done'   // dockerd 기동 대기
-                        sh 'docker run --rm $ORBIT_ENV_ARGS "$ORBIT_CLI_IMAGE" doctor'
+                        script {
+                            withOrbitServer {
+                                sh 'docker run --rm $ORBIT_ENV_ARGS $ORBIT_SERVER_ARGS "$ORBIT_CLI_IMAGE" doctor'
+                            }
+                        }
                     }
                 }
             }
@@ -134,23 +137,26 @@ pipeline {
                             // stage 끼리 의존하지 않도록 여기서도 dockerd 기동을 기다립니다
                             sh 'until docker info >/dev/null 2>&1; do sleep 1; done'
 
-                            def status = sh(returnStatus: true, script: '''
-                                # 산출물을 임시 폴더에 담아 폴더째 넣습니다. 파일을 그대로 넣으면 이름이 바뀌어 형식을 알아보지 못합니다.
-                                NAME="$(basename "$SCAN_TARGET")"
-                                TARGET_DIR="$(mktemp -d)"
-                                cp -R "$SCAN_TARGET" "$TARGET_DIR/"
-                                chmod -R a+rX "$TARGET_DIR"   # CLI는 비루트(65532)로 돕니다. mktemp 폴더(700)는 읽지 못합니다.
-                                CID="$(docker create $ORBIT_ENV_ARGS "$ORBIT_CLI_IMAGE" \
-                                  scan file "/target/$NAME" --details --format json)"
-                                docker cp "$TARGET_DIR" "$CID:/target"
-                                set +e
-                                docker start -a "$CID" > gate.json
-                                STATUS=$?
-                                set -e
-                                docker rm "$CID" > /dev/null
-                                rm -rf "$TARGET_DIR"
-                                exit $STATUS
-                            ''')
+                            def status = 0
+                            withOrbitServer {
+                                status = sh(returnStatus: true, script: '''
+                                    # 산출물을 임시 폴더에 담아 폴더째 넣습니다. 파일을 그대로 넣으면 이름이 바뀌어 형식을 알아보지 못합니다.
+                                    NAME="$(basename "$SCAN_TARGET")"
+                                    TARGET_DIR="$(mktemp -d)"
+                                    cp -R "$SCAN_TARGET" "$TARGET_DIR/"
+                                    chmod -R a+rX "$TARGET_DIR"   # CLI는 비루트(65532)로 돕니다. mktemp 폴더(700)는 읽지 못합니다.
+                                    CID="$(docker create $ORBIT_ENV_ARGS $ORBIT_SERVER_ARGS "$ORBIT_CLI_IMAGE" \
+                                      scan file "/target/$NAME" --details --format json)"
+                                    docker cp "$TARGET_DIR" "$CID:/target"
+                                    set +e
+                                    docker start -a "$CID" > gate.json
+                                    STATUS=$?
+                                    set -e
+                                    docker rm "$CID" > /dev/null
+                                    rm -rf "$TARGET_DIR"
+                                    exit $STATUS
+                                ''')
+                            }
                             sh 'cat gate.json || echo "(판정 응답 없음)"'
                             echo "scan file 종료 코드: ${status}"
                             if (status != 0) { error("scan file 통과 아님 (exit=${status})") }
