@@ -9,7 +9,8 @@ Declarative Pipeline에 Orbit CLI 빌드 게이트를 붙이는 예제입니다.
 |:-:|---|---|
 | 1 | [`Jenkinsfile.cli-test`](Jenkinsfile.cli-test) | **dry-run.** 이미지를 만들거나 올리지 않고 `version`, `doctor`, `scan file`로 자격·네트워크·서버 판정이 통하는지 확인합니다. |
 | 2 | [`Jenkinsfile`](Jenkinsfile) | **본적용 템플릿.** 자기 파이프라인에 복사해 씁니다. 이미지를 판정하고(`scan image`), 올린 뒤 확정 digest를 보고합니다(`scan promote`). |
-| 2 (시연) | [`Jenkinsfile.default`](Jenkinsfile.default) | `Jenkinsfile`과 같고, 입력 블록을 ttl.sh 시연 값(`IMAGE=ttl.sh/orbit/orbit-gate-hello-default`, `IMAGE_TAG=1h`, `REGISTRY_CREDENTIALS_ID=none`)으로 미리 채운 파일입니다. 가입 없이 이 저장소를 바로 시연할 때 씁니다. ttl.sh에 올린 이미지는 누구나 받을 수 있습니다. |
+| 2 (시연) | [`Jenkinsfile.default`](Jenkinsfile.default) | `Jenkinsfile`과 같고, 입력 블록을 ttl.sh 시연 값(`IMAGE=ttl.sh/orbit/orbit-gate-hello-default`, `IMAGE_TAG=1h`, `REGISTRY_CREDENTIALS_ID=none`)으로 미리 채운 파일입니다. 가입 없이 이 저장소를 바로 시연할 때 씁니다. 루트 [`Dockerfile`](../Dockerfile)로 빌드해 취약 라이브러리(CVE-2022-42889)가 들어 있으므로, 조직 정책에 따라 판정에서 차단될 수 있습니다. ttl.sh에 올린 이미지는 누구나 받을 수 있습니다. |
+| 2 (시연, 대조군) | [`Jenkinsfile.clean`](Jenkinsfile.clean) | `Jenkinsfile.default`와 같고, 빌드 대상만 [`Dockerfile.clean`](../Dockerfile.clean)(취약 라이브러리 없음)이고 이미지는 `ttl.sh/orbit/orbit-gate-hello-clean`입니다. 판정을 통과해 Push·Promote까지 가는 흐름을 볼 때 씁니다. 통과 여부는 조직 정책이 정하므로 첫 실행의 `gate.json`에서 위반 수를 확인합니다. |
 
 공통 사전 준비(CI 인증 키, CLI 이미지 digest, 레지스트리)와 공통 원칙은 [저장소 README](../README.md)에 있습니다.
 

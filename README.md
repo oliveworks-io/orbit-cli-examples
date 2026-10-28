@@ -114,7 +114,7 @@ crane digest ghcr.io/oliveworks-io/orbit-cli:<버전>
 
 ### 적용 템플릿
 
-이 저장소에서 그대로 실행하면 루트의 시연용 이미지를 빌드하고, 자기 CI에 복사하면 자기 저장소의 Dockerfile을 빌드합니다. 루트의 [`Dockerfile`](Dockerfile)은 앱 소스가 없는 시연용 이미지 `orbit-gate-hello`를 만들고, [`vendor/`](vendor)의 JAR 하나를 넣습니다. 이 JAR에는 알려진 취약점(CVE-2022-42889)이 있지만 이미지에 JRE가 없어 실행 경로가 없습니다.
+이 저장소에서 그대로 실행하면 루트의 시연용 이미지를 빌드하고, 자기 CI에 복사하면 자기 저장소의 Dockerfile을 빌드합니다. 루트의 [`Dockerfile`](Dockerfile)은 앱 소스가 없는 시연용 이미지 `orbit-gate-hello`를 만들고, [`vendor/`](vendor)의 JAR 하나를 넣습니다. 이 JAR에는 알려진 취약점(CVE-2022-42889)이 있지만 이미지에 JRE가 없어 실행 경로가 없습니다. 대조군인 [`Dockerfile.clean`](Dockerfile.clean)은 같은 베이스에서 이 JAR을 뺀 이미지 `orbit-gate-hello-clean`을 만듭니다(Jenkins의 [`Jenkinsfile.clean`](jenkins/Jenkinsfile.clean)이 사용).
 
 | 순서 | 단계 | 명령 | 하는 일 | 멈추는 경우 |
 |:-:|---|---|---|---|
