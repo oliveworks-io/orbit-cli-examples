@@ -48,7 +48,7 @@ CI 도구의 비밀 저장소에 다음 두 값을 등록합니다.
 CLI 컨테이너 이미지는 **태그가 아니라 digest로 고정**해서 씁니다. 같은 태그에 다른 내용이 올라가면 어제 통과한 빌드가 오늘 다른 바이너리로 실행될 수 있기 때문입니다. 샘플은 아래 값으로 이미 고정되어 있어 바꿀 필요가 없습니다.
 
 ```text
-ghcr.io/oliveworks-io/orbit-cli:2.0.1@sha256:ce55fd53b389998ee2fa125ca6e5baf944384c1f9c56f5ff2c8e9bbe1e6aceca
+ghcr.io/oliveworks-io/orbit-cli:2.0.2@sha256:f4a00f27011e01bc277d0713fe6988a4fb4cd3633926c85ba804c302de6dc7de
 ```
 
 다른 버전을 쓰려면 digest를 확인해 샘플의 `ORBIT_CLI_IMAGE`(Tekton은 CLI step의 `image`)를 바꿉니다. `latest`, `2`처럼 움직이는 태그는 쓰지 않습니다.
@@ -114,7 +114,7 @@ crane digest ghcr.io/oliveworks-io/orbit-cli:<버전>
 
 ### 적용 템플릿
 
-이 저장소에서 그대로 실행하면 루트의 시연용 이미지를 빌드하고, 자기 CI에 복사하면 자기 저장소의 Dockerfile을 빌드합니다. 루트의 [`Dockerfile`](Dockerfile)은 앱 소스가 없는 시연용 이미지 `orbit-gate-hello`를 만들고, [`vendor/`](vendor)의 JAR 하나를 넣습니다. 이 JAR에는 알려진 취약점(CVE-2022-42889)이 있지만 이미지에 JRE가 없어 실행 경로가 없습니다.
+이 저장소에서 그대로 실행하면 루트의 시연용 이미지를 빌드하고, 자기 CI에 복사하면 자기 저장소의 Dockerfile을 빌드합니다. 루트의 [`Dockerfile`](Dockerfile)은 앱 소스가 없는 시연용 이미지 `orbit-gate-hello`를 만들고, [`vendor/`](vendor)의 JAR 하나를 넣습니다. 이 JAR에는 알려진 취약점(CVE-2022-42889)이 있지만 이미지에 JRE가 없어 실행 경로가 없습니다. 대조군인 [`Dockerfile.clean`](Dockerfile.clean)은 같은 베이스에서 이 JAR을 뺀 이미지 `orbit-gate-hello-clean`을 만듭니다(Jenkins의 [`Jenkinsfile.clean`](jenkins/Jenkinsfile.clean)이 사용).
 
 | 순서 | 단계 | 명령 | 하는 일 | 멈추는 경우 |
 |:-:|---|---|---|---|
@@ -174,7 +174,7 @@ crane digest ghcr.io/oliveworks-io/orbit-cli:<버전>
 | Tekton Pipelines | TBD |
 | 기타 CI | TBD |
 
-> 샘플은 Orbit CLI 2.0.1 기준으로 작성했습니다. 사용하는 CI 환경에 맞춰 이미지 이름, 변수 이름, 러너 구성을 조정하고, 운영 파이프라인에 적용하기 전에 테스트 파이프라인에서 먼저 확인하십시오.
+> 샘플은 Orbit CLI 2.0.2 기준으로 작성했습니다. 사용하는 CI 환경에 맞춰 이미지 이름, 변수 이름, 러너 구성을 조정하고, 운영 파이프라인에 적용하기 전에 테스트 파이프라인에서 먼저 확인하십시오.
 
 ## 문의
 

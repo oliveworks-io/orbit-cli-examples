@@ -55,7 +55,7 @@ manual/example/myapp/release          ← 수동 빌드
 자격, 빌드 좌표, 이미지 좌표가 정상인지 이미지를 만들지 않고 확인합니다. 서버에 접속하지 않습니다.
 
 ```sh
-ORBIT_CLI_IMAGE='ghcr.io/oliveworks-io/orbit-cli:2.0.1@sha256:ce55fd53b389998ee2fa125ca6e5baf944384c1f9c56f5ff2c8e9bbe1e6aceca'
+ORBIT_CLI_IMAGE='ghcr.io/oliveworks-io/orbit-cli:2.0.2@sha256:f4a00f27011e01bc277d0713fe6988a4fb4cd3633926c85ba804c302de6dc7de'
 docker run --rm "$ORBIT_CLI_IMAGE" version
 docker run --rm -e ORBIT_CLIENT_ID -e ORBIT_CLIENT_SECRET "$ORBIT_CLI_IMAGE" \
   doctor --pipeline-ref "circleci.com/example/myapp/build" \
