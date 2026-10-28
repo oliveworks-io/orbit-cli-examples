@@ -15,7 +15,7 @@
 // 사용 전에 아래 값을 확인합니다.
 //   SCAN_TARGET     : scan file로 판정할 빌드 산출물 경로(저장소 기준). JAR, Go·Rust 바이너리,
 //                     rootfs 디렉터리 등. 소스 트리는 대상이 아닙니다.
-//   ORBIT_CLI_IMAGE : CLI 2.0.1에 digest로 고정되어 있습니다. 다른 버전은 README 참고
+//   ORBIT_CLI_IMAGE : CLI 2.0.2에 digest로 고정되어 있습니다. 다른 버전은 README 참고
 // 필요한 자격(Manage Jenkins > Credentials): orbit-client-id, orbit-client-secret (Secret text)
 //   설치형(폐쇄망)은 orbit-address, orbit-issuer(Secret text)도 등록합니다. 아래 ORBIT_*_CREDENTIALS_ID 참고
 // Orbit 서버 주소(ORBIT_ADDRESS, ORBIT_ISSUER)를 Jenkins Credentials에서 읽어 body를 실행합니다.
@@ -89,7 +89,7 @@ pipeline {
         //   ORBIT_ISSUER  : Keycloak realm 주소. 값 예: https://sso.<설치 도메인>/realms/<realm 이름>
         ORBIT_ADDRESS_CREDENTIALS_ID = 'orbit-address'
         ORBIT_ISSUER_CREDENTIALS_ID  = 'orbit-issuer'
-        ORBIT_CLI_IMAGE     = 'ghcr.io/oliveworks-io/orbit-cli:2.0.1@sha256:ce55fd53b389998ee2fa125ca6e5baf944384c1f9c56f5ff2c8e9bbe1e6aceca'
+        ORBIT_CLI_IMAGE     = 'ghcr.io/oliveworks-io/orbit-cli:2.0.2@sha256:f4a00f27011e01bc277d0713fe6988a4fb4cd3633926c85ba804c302de6dc7de'
         ORBIT_CLIENT_ID     = credentials('orbit-client-id')
         ORBIT_CLIENT_SECRET = credentials('orbit-client-secret')
         // CLI 컨테이너에 넘길 환경변수. 컨테이너는 에이전트의 환경변수를 물려받지 않습니다.

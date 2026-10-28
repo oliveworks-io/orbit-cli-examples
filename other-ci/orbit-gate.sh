@@ -33,8 +33,8 @@ CI_RUN_ID="${CI_RUN_ID:-local-$(date +%Y%m%d%H%M%S)}"
 # ─────────────────────────────────────────────────────────────────────────
 
 CANDIDATE_IMAGE='orbit-gate-candidate:local'
-# CLI 2.0.1에 digest로 고정되어 있습니다. 다른 버전은 README 참고
-ORBIT_CLI_IMAGE='ghcr.io/oliveworks-io/orbit-cli:2.0.1@sha256:ce55fd53b389998ee2fa125ca6e5baf944384c1f9c56f5ff2c8e9bbe1e6aceca'
+# CLI 2.0.2에 digest로 고정되어 있습니다. 다른 버전은 README 참고
+ORBIT_CLI_IMAGE='ghcr.io/oliveworks-io/orbit-cli:2.0.2@sha256:f4a00f27011e01bc277d0713fe6988a4fb4cd3633926c85ba804c302de6dc7de'
 GIT_COMMIT="$(git rev-parse HEAD)"
 GATE_REF="$IMAGE:${IMAGE_TAG:-$GIT_COMMIT}"
 
