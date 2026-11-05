@@ -97,7 +97,8 @@ pipeline {
         // 판정하고 올릴 이미지. 예: registry.example.com/team/myapp
         // 첫 부분(registry.example.com)이 레지스트리 주소이며, push와 로그인 모두 이 주소로 갑니다.
         // 시연: ttl.sh/orbit/orbit-gate-hello-<임의 문자열> + IMAGE_TAG = '1h' (자격 불필요, 공개됨)
-        IMAGE                   = 'ttl.sh/orbit/orbit-gate-hello-clean'
+        // Jenkinsfile.default와 같은 이름을 씁니다. 취약점을 고친 같은 이미지의 다음 빌드로 보이게 하기 위해서입니다.
+        IMAGE                   = 'ttl.sh/orbit/orbit-gate-hello-default'
         // 비우면 커밋 해시를 태그로 씁니다.
         IMAGE_TAG               = '1h'
         // 레지스트리 로그인. 둘 중 하나를 반드시 적습니다. 정하지 않으면 Push에서 멈춥니다.
